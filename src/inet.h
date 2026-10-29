@@ -66,6 +66,7 @@ void                 inet_anyaddr   (sa_family_t family, inet_addr_t *addr);
 inet_addr_t          inet_netaddr   (inet_addr_t *addr, int len);
 
 int                  inet_addr_cmp  (inet_addr_t *a, inet_addr_t *b);
+uint16_t             inet_cksum     (const void *buf, size_t len);
 
 const char          *inet_addr2str  (inet_addr_t *addr, char *str, size_t len);
 int                  inet_str2addr  (const char *str, inet_addr_t *addr);
