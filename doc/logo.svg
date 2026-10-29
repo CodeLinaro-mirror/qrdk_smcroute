@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <title>SMCRoute</title>
+  <desc>A circuit board with one copper trace splitting into three: multicast routes etched in copper.</desc>
+  <rect x="12" y="12" width="232" height="232" rx="20" fill="#0f6b3e"/>
+  <g fill="#e8a85a">
+    <circle cx="36" cy="36" r="8"/><circle cx="220" cy="36" r="8"/>
+    <circle cx="36" cy="220" r="8"/><circle cx="220" cy="220" r="8"/>
+  </g>
+  <g fill="#072c1b">
+    <circle cx="36" cy="36" r="4"/><circle cx="220" cy="36" r="4"/>
+    <circle cx="36" cy="220" r="4"/><circle cx="220" cy="220" r="4"/>
+  </g>
+  <g fill="none" stroke="#e8a85a" stroke-width="9" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M56,128 H112"/>
+    <path d="M112,128 L164,76 H196"/>
+    <path d="M112,128 H196"/>
+    <path d="M112,128 L164,180 H196"/>
+  </g>
+  <g fill="#e8a85a">
+    <rect x="42" y="114" width="28" height="28" rx="3"/>
+    <circle cx="112" cy="128" r="8"/>
+    <circle cx="196" cy="76" r="14"/><circle cx="196" cy="128" r="14"/><circle cx="196" cy="180" r="14"/>
+  </g>
+  <g fill="#072c1b">
+    <circle cx="56" cy="128" r="6"/>
+    <circle cx="112" cy="128" r="3.5"/>
+    <circle cx="196" cy="76" r="6"/><circle cx="196" cy="128" r="6"/><circle cx="196" cy="180" r="6"/>
+  </g>
+</svg>

@@ -1,6 +1,7 @@
-SMCRoute - A static multicast routing daemon
-============================================
+<div align="center"><img src="doc/wordmark.svg" width="560" alt="SMCRoute - A static multicast routing daemon">
+
 [![License Badge][]][License] [![GitHub Status][]][GitHub] [![Coverity Status][]][Coverity Scan]
+</div>
 
 Table of Contents
 -----------------
