@@ -61,8 +61,7 @@ static int  mroute_dyn_add     (struct mroute *route);
 static int  mroute_resolve     (struct mroute *route);
 static int  is_match           (struct mroute *rule, struct mroute *cand);
 static int  is_exact_match     (struct mroute *rule, struct mroute *cand);
-static int  mfc_install        (struct mroute *route);
-static int  mfc_uninstall      (struct mroute *route);
+static void mfc_prune_vif      (int family, int vif);
 
 /* Check for kernel IGMPMSG_NOCACHE for (*,G) hits. I.e., source-less routes. */
 static void handle_nocache4(int sd, void *arg)
@@ -231,30 +230,6 @@ static void mroute4_disable(void)
 	}
 }
 
-/*
- * Prune VIF from all existing routes and update kernel MFC.  If VIF is
- * used as inbound, prune entire route, otherwise just the outbound.
- */
-static void mroute4_prune_vif(int vif)
-{
-	struct mroute *entry, *tmp;
-
-	TAILQ_FOREACH_SAFE(entry, &conf_list, link, tmp) {
-		if (entry->group.ss_family != AF_INET)
-			continue;
-
-		if (entry->inbound == vif) {
-			TAILQ_REMOVE(&conf_list, entry, link);
-			entry->unused = 1;
-			mfc_uninstall(entry);
-			free(entry);
-		} else if (entry->ttl[vif] > 0) {
-			entry->ttl[vif] = 0;
-			mfc_install(entry);
-		}
-	}
-}
-
 /* Create a virtual interface from @iface so it can be used for IPv4 multicast routing. */
 static int mroute4_add_vif(struct iface *iface)
 {
@@ -314,7 +289,7 @@ static int mroute4_del_vif(struct iface *iface)
 	}
 
 	if (iface->vif != ALL_VIFS)
-		mroute4_prune_vif(iface->vif);
+		mfc_prune_vif(AF_INET, iface->vif);
 	iface->vif = ALL_VIFS;
 
 	return rc;
@@ -392,13 +367,18 @@ static struct mroute *conf_find(struct mroute *route)
 	return NULL;
 }
 
-/* find any existing route, with matching inbound interface */
-static struct mroute *kern_find(struct mroute *route)
+/*
+ * The kernel keys its MFC on (S,G) only, the inbound VIF is a property
+ * of the entry.  Mirror that: at most one entry per (S,G).
+ */
+static struct mroute *mfc_find(struct mroute *route)
 {
 	struct mroute *entry;
 
 	TAILQ_FOREACH(entry, &kern_list, link) {
-		if (is_match(route, entry))
+		if (inet_addr_cmp(&entry->source, &route->source))
+			continue;
+		if (!inet_addr_cmp(&entry->group, &route->group))
 			return entry;
 	}
 
@@ -431,6 +411,17 @@ static unsigned long get_valid_pkt(struct mroute *route)
 	return ms.ms_pktcnt - ms.ms_wrong_if;
 }
 
+static int mfc_drop(struct mroute *kern)
+{
+	int rc;
+
+	rc = kern_mroute_del(kern);
+	TAILQ_REMOVE(&kern_list, kern, link);
+	free(kern);
+
+	return rc;
+}
+
 /**
  * mroute_expire - Expire dynamically added (*,G) routes
  * @max_idle: Timeout for routes in seconds, 0 to expire all dynamic routes
@@ -452,7 +443,7 @@ void mroute_expire(int max_idle)
 		char origin[INET_ADDRSTR_LEN], group[INET_ADDRSTR_LEN];
 		struct iface *iface;
 
-		/* XXX: only consider (*,G) routes, not pure (S,G), and no overlap handling for now */
+		/* an (S,G) rule pins its entry, learned entries expire */
 		if (conf_find(entry))
 			continue;
 
@@ -486,119 +477,121 @@ void mroute_expire(int max_idle)
 
 			/* Not used, expire */
 			smclog(LOG_DEBUG, "  -> Yup, stale route.");
-			kern_mroute_del(entry);
-			TAILQ_REMOVE(&kern_list, entry, link);
-			free(entry);
+			mfc_drop(entry);
+		}
+	}
+}
+
+/* Rebuild the oif set of kernel entry @kern from every rule covering it */
+static void mfc_compute(struct mroute *kern)
+{
+	struct mroute *conf;
+
+	memset(kern->ttl, 0, sizeof(kern->ttl));
+	TAILQ_FOREACH(conf, &conf_list, link) {
+		if (!is_match(conf, kern))
+			continue;
+
+		for (size_t i = 0; i < NELEMS(kern->ttl); i++) {
+			if (conf->ttl[i])
+				kern->ttl[i] = conf->ttl[i];
 		}
 	}
 }
 
 /*
- * Install or update kernel MFC.  Installing a new route currently
- * requires an (S,G) entry, updating only requires a (*,G), which
- * is to handle overlaps.
- *
- * Currently, meaning Linux has support for (*,*) and (*,G) routing
- * but supporting that would require quite a bit of changes.  I.e.,
- * it's not just about removing the `!is_ssm(conf)` check ...
+ * Recompute and push @kern to the kernel.  An entry no exact (S,G)
+ * rule pins, and no rule gives any oif, is dropped instead.
  */
-static int mfc_install(struct mroute *route)
+static int mfc_update(struct mroute *kern)
+{
+	mfc_compute(kern);
+	if (!is_active(kern) && !conf_find(kern))
+		return mfc_drop(kern);
+
+	return kern_mroute_add(kern);
+}
+
+/* Update every kernel entry covered by @rule, e.g. after it changed */
+static int mfc_update_matching(struct mroute *rule)
+{
+	struct mroute *kern, *tmp;
+	int rc = 0;
+
+	TAILQ_FOREACH_SAFE(kern, &kern_list, link, tmp) {
+		if (!is_match(rule, kern))
+			continue;
+		if (mfc_update(kern))
+			rc = -1;
+	}
+
+	return rc;
+}
+
+/*
+ * Look up, or create, the kernel entry for the exact (S,G) in @route
+ * and claim it for @route's inbound, like MRT_ADD_MFC does.
+ */
+static struct mroute *mfc_ensure(struct mroute *route)
 {
 	struct mroute *kern;
 
-	kern = kern_find(route);
+	kern = mfc_find(route);
 	if (!kern) {
-		if (!is_ssm(route))
-			return 0;
-
 		kern = malloc(sizeof(struct mroute));
 		if (!kern) {
 			smclog(LOG_WARNING, "Cannot add kernel route: %s", strerror(errno));
-			return 1;
+			return NULL;
 		}
 
 		memcpy(kern, route, sizeof(struct mroute));
 		TAILQ_INSERT_TAIL(&kern_list, kern, link);
-
-		return kern_mroute_add(kern);
 	}
+	kern->inbound = route->inbound;
 
-	TAILQ_FOREACH(kern, &kern_list, link) {
-		if (!is_match(route, kern))
-			continue;
-
-		for (size_t i = 0; i < NELEMS(route->ttl); i++) {
-			if (route->ttl[i] > 0 && kern->ttl[i] != route->ttl[i])
-				kern->ttl[i] = route->ttl[i];
-		}
-
-		kern_mroute_add(kern);
-	}
-
-	return 0;
+	return kern;
 }
 
 /*
- * When route has an empty oif list -- attempt full removal of the
- * route, unless there exist other configured routes that map to the
- * same kernel MFC entry.
- *
- * When route oif list is *not* empty, attempt to remove only select
- * interfaces from the MFC entry.  Again, unless other configured
- * routes map to the same MFC entry.
+ * Bring the kernel up to date with rule @conf.  Only an (S,G) rule
+ * gets an entry of its own, a (*,G) rule covers entries that exist.
  */
-static int mfc_uninstall(struct mroute *route)
+static int mfc_install(struct mroute *conf)
 {
-	struct mroute *conf, *kern, *tmp;
-	int removal = !is_active(route);
-	int diff = 0;
-	int rc = 0;
+	if (is_ssm(conf) && !mfc_ensure(conf))
+		return 1;
 
-	TAILQ_FOREACH_SAFE(kern, &kern_list, link, tmp) {
-		if (!is_match(route, kern))
+	return mfc_update_matching(conf);
+}
+
+/*
+ * A VIF went away: drop every entry it fed, and take it out of the
+ * oifs of every rule and entry it was listed in.
+ */
+static void mfc_prune_vif(int family, int vif)
+{
+	struct mroute *entry, *tmp;
+
+	TAILQ_FOREACH_SAFE(entry, &conf_list, link, tmp) {
+		if (entry->group.ss_family != family)
 			continue;
 
-		if (route->unused)
-			goto cleanup;
-
-		/* First remove OIFs from route entry */
-		for (size_t i = 0; i < NELEMS(route->ttl); i++) {
-			if (removal || route->ttl[i] > 0) {
-				kern->ttl[i] = 0;
-				diff++;
-			}
-		}
-
-		/* Then, for each matching conf we add its oifs */
-		TAILQ_FOREACH(conf, &conf_list, link) {
-			if (!is_match(kern, conf))
-				continue;
-
-			for (size_t i = 0; i < NELEMS(conf->ttl); i++) {
-				if (conf->ttl[i] > 0 && kern->ttl[i] == 0) {
-					kern->ttl[i] = conf->ttl[i];
-					diff++;
-				}
-			}
-		}
-
-		if (!diff && !removal)
-			continue;
-
-		if (is_active(kern) || !removal) {
-			if (kern_mroute_add(kern))
-				rc = -1;
-			continue;
-		}
-
-	cleanup:
-		if (kern_mroute_del(kern))
-			rc = -1;
-		TAILQ_REMOVE(&kern_list, kern, link);
-		free(kern);
+		if (entry->inbound == vif) {
+			TAILQ_REMOVE(&conf_list, entry, link);
+			free(entry);
+		} else
+			entry->ttl[vif] = 0;
 	}
 
-	return rc;
+	TAILQ_FOREACH_SAFE(entry, &kern_list, link, tmp) {
+		if (entry->group.ss_family != family)
+			continue;
+
+		if (entry->inbound == vif)
+			mfc_drop(entry);
+		else if (entry->ttl[vif])
+			mfc_update(entry);
+	}
 }
 
 /**
@@ -660,33 +653,31 @@ int mroute_add_route(struct mroute *route)
 int mroute_del_route(struct mroute *route)
 {
 	struct mroute *conf;
-	int rc = 0;
+	int rc;
 
 	if (route->unused) {
 		conf = route;
-		goto cleanup;
-	}
-
-	conf = conf_find(route);
-	if (!conf) {
-		errno = ENOENT;
-		return -1;
-	}
-
-	if (is_active(route)) {
-		/* remove only the listed oifs from config */
-		for (size_t i = 0; i < NELEMS(conf->ttl); i++) {
-			if (route->ttl[i] > 0 && conf->ttl[i] != 0)
-				conf->ttl[i] = 0;
+	} else {
+		conf = conf_find(route);
+		if (!conf) {
+			errno = ENOENT;
+			return -1;
 		}
 
-		rc = mfc_uninstall(route);
-	} else {
-	cleanup:
-		TAILQ_REMOVE(&conf_list, conf, link);
-		rc = mfc_uninstall(route);
-		free(conf);
+		if (is_active(route)) {
+			/* remove only the listed oifs from config */
+			for (size_t i = 0; i < NELEMS(conf->ttl); i++) {
+				if (route->ttl[i] > 0)
+					conf->ttl[i] = 0;
+			}
+
+			return mfc_update_matching(conf);
+		}
 	}
+
+	TAILQ_REMOVE(&conf_list, conf, link);
+	rc = mfc_update_matching(conf);
+	free(conf);
 
 	return rc;
 }
@@ -851,30 +842,6 @@ static void mroute6_disable(void)
 }
 
 #ifdef HAVE_IPV6_MULTICAST_ROUTING
-/*
- * Prune VIF from all existing routes and update kernel MFC.  If VIF is
- * used as inbound, prune entire route, otherwise just the outbound.
- */
-static void mroute6_prune_mif(int mif)
-{
-	struct mroute *entry, *tmp;
-
-	TAILQ_FOREACH_SAFE(entry, &conf_list, link, tmp) {
-		if (entry->group.ss_family != AF_INET6)
-			continue;
-
-		if (entry->inbound == mif) {
-			TAILQ_REMOVE(&conf_list, entry, link);
-			entry->unused = 1;
-			mfc_uninstall(entry);
-			free(entry);
-		} else if (entry->ttl[mif] > 0) {
-			entry->ttl[mif] = 0;
-			mfc_install(entry);
-		}
-	}
-}
-
 /* Create a virtual interface from @iface so it can be used for IPv6 multicast routing. */
 static int mroute6_add_mif(struct iface *iface)
 {
@@ -929,7 +896,7 @@ static int mroute6_del_mif(struct iface *iface)
 	}
 
 	if (iface->mif != ALL_VIFS)
-		mroute6_prune_mif(iface->mif);
+		mfc_prune_vif(AF_INET6, iface->mif);
 	iface->mif = ALL_VIFS;
 
 	return rc;
@@ -938,25 +905,30 @@ static int mroute6_del_mif(struct iface *iface)
 
 /*
  * Look up a configured (*,G) rule whose inbound matches @route's iif
- * and install/replace the kernel MFC entry with the rule's ttl[] mask.
- * Shared by both NOCACHE (via mroute_dyn_add) and WRONGVIF/WRONGMIF.
- * Returns 0 on hit, -1 with errno=ENOENT on miss (kernel entry, if
- * any, left alone).
+ * and install/replace the kernel MFC entry for it.  Shared by both
+ * NOCACHE (via mroute_dyn_add) and WRONGVIF/WRONGMIF.  Returns 0 on
+ * hit, -1 with errno=ENOENT on miss (kernel entry, if any, left alone).
  */
 static int mroute_resolve(struct mroute *route)
 {
-	struct mroute *entry;
+	struct mroute *entry, *kern;
 
 	TAILQ_FOREACH(entry, &conf_list, link) {
-		if (is_ssm(entry) || !is_match(entry, route))
-			continue;
-		memcpy(route->ttl, entry->ttl, NELEMS(route->ttl) * sizeof(route->ttl[0]));
-		mfc_install(route);
-		return 0;
+		if (is_match(entry, route))
+			break;
 	}
 
-	errno = ENOENT;
-	return -1;
+	if (!entry) {
+		errno = ENOENT;
+		return -1;
+	}
+
+	kern = mfc_ensure(route);
+	if (!kern)
+		return -1;
+
+	mfc_update(kern);
+	return 0;
 }
 
 /*
@@ -966,11 +938,17 @@ static int mroute_resolve(struct mroute *route)
  */
 static int mroute_dyn_add(struct mroute *route)
 {
+	struct mroute *kern;
+
 	if (mroute_resolve(route) == 0)
 		return 0;
 
-	memset(route->ttl, 0, NELEMS(route->ttl) * sizeof(route->ttl[0]));
-	mfc_install(route);
+	kern = mfc_ensure(route);
+	if (kern) {
+		memset(kern->ttl, 0, sizeof(kern->ttl));
+		kern_mroute_add(kern);
+	}
+
 	errno = ENOENT;
 	return -1;
 }
@@ -1112,10 +1090,6 @@ void mroute_reload_end(void)
 		if (entry->unused)
 			mroute_del_route(entry);
 	}
-
-	/* retry add if .conf changed IIF for routes, not until del (above) can we add */
-	TAILQ_FOREACH(entry, &conf_list, link)
-		mfc_install(entry);
 }
 
 static int show_mroute_json(int sd, struct mroute *r, int first)
