@@ -28,6 +28,9 @@ void mcgroup_exit      (void);
 
 int  mcgroup_action    (int cmd, const char *ifname, inet_addr_t *source, int src_len, inet_addr_t *group, int len);
 
+int  mcgroup_join      (struct iface *iface, inet_addr_t *source, inet_addr_t *group);
+void mcgroup_leave     (struct iface *iface, inet_addr_t *source, inet_addr_t *group, int sd);
+
 int  mcgroup_show      (int sd, enum show_mode mode);
 
 #endif /* SMCROUTE_MCGROUP_H_ */

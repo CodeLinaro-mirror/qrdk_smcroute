@@ -24,10 +24,19 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
+#ifdef IP_RECVIF
+#include <net/if_dl.h>
+#endif
+#include <netinet/ip.h>
+#ifdef HAVE_IPV6_MULTICAST_HOST
+#include <netinet/icmp6.h>
+#include <netinet/ip6.h>
+#endif
 
 #include "iface.h"
 #include "kern.h"
 #include "log.h"
+#include "mld.h"
 #include "mrdisc.h"
 #include "socket.h"
 #include "util.h"
@@ -186,8 +195,135 @@ int kern_join_leave(int sd, int cmd, struct mcgroup *mcg)
 	return 0;
 }
 
+/* Replace the source filter of @sd's membership of @group on @iface, RFC 3678 */
+int kern_set_filter(int sd, struct iface *iface, inet_addr_t *group, int exclude, inet_addr_t *srcs, int num)
+{
+#ifdef HAVE_STRUCT_GROUP_REQ
+	socklen_t len = sizeof(struct sockaddr_in);
+
+#ifdef HAVE_IPV6_MULTICAST_HOST
+	if (group->ss_family == AF_INET6)
+		len = sizeof(struct sockaddr_in6);
+#endif
+	return setsourcefilter(sd, iface->ifindex, (struct sockaddr *)group, len,
+			       exclude ? MCAST_EXCLUDE : MCAST_INCLUDE, num, srcs);
+#else
+	(void)sd; (void)iface; (void)group; (void)exclude; (void)srcs; (void)num;
+	return errno = ENOTSUP;
+#endif
+}
+
+/*
+ * Read a packet from one of the mrouted sockets along with its ancillary
+ * data.  The IPv4 header is part of the data, the IPv6 one is not.
+ */
+ssize_t kern_recv(int sd, void *buf, size_t len, struct kern_rx *rx)
+{
+	struct sockaddr_storage from;
+	struct cmsghdr *cmsg;
+	struct msghdr msgh;
+	struct iovec iov;
+	char cmbuf[256];
+	ssize_t num;
+
+	memset(rx, 0, sizeof(*rx));
+	rx->hlim = -1;
+
+	iov.iov_base = buf;
+	iov.iov_len  = len;
+
+	memset(&msgh, 0, sizeof(msgh));
+	msgh.msg_name       = &from;
+	msgh.msg_namelen    = sizeof(from);
+	msgh.msg_iov        = &iov;
+	msgh.msg_iovlen     = 1;
+	msgh.msg_control    = cmbuf;
+	msgh.msg_controllen = sizeof(cmbuf);
+
+	num = recvmsg(sd, &msgh, 0);
+	if (num < 0)
+		return -1;
+
+	for (cmsg = CMSG_FIRSTHDR(&msgh); cmsg; cmsg = CMSG_NXTHDR(&msgh, cmsg)) {
+#ifdef IP_PKTINFO
+		if (cmsg->cmsg_level == IPPROTO_IP && cmsg->cmsg_type == IP_PKTINFO) {
+			struct in_pktinfo ipi;
+
+			memcpy(&ipi, CMSG_DATA(cmsg), sizeof(ipi));
+			rx->ifindex = ipi.ipi_ifindex;
+		}
+#elif defined(IP_RECVIF)
+		if (cmsg->cmsg_level == IPPROTO_IP && cmsg->cmsg_type == IP_RECVIF)
+			rx->ifindex = ((struct sockaddr_dl *)CMSG_DATA(cmsg))->sdl_index;
+#endif
+#ifdef HAVE_IPV6_MULTICAST_HOST
+		if (cmsg->cmsg_level == IPPROTO_IPV6 && cmsg->cmsg_type == IPV6_PKTINFO) {
+			struct in6_pktinfo ipi6;
+
+			memcpy(&ipi6, CMSG_DATA(cmsg), sizeof(ipi6));
+			rx->ifindex = ipi6.ipi6_ifindex;
+		}
+		if (cmsg->cmsg_level == IPPROTO_IPV6 && cmsg->cmsg_type == IPV6_HOPLIMIT)
+			memcpy(&rx->hlim, CMSG_DATA(cmsg), sizeof(rx->hlim));
+#endif
+	}
+
+#ifdef HAVE_IPV6_MULTICAST_HOST
+	if (msgh.msg_namelen >= sizeof(struct sockaddr_in6) && from.ss_family == AF_INET6)
+		inet_addr6_set(&rx->src, &((struct sockaddr_in6 *)&from)->sin6_addr);
+#endif
+
+	return num;
+}
+
+/*
+ * Send a query or report on @iface from the mrouted socket of @dst's family.
+ * The sockets carry the Router Alert option and hop limit 1.
+ */
+int kern_send(struct iface *iface, inet_addr_t *dst, const void *buf, size_t len)
+{
+	inet_addr_t to = *dst;
+	socklen_t slen;
+	int sd;
+
+#ifdef HAVE_IPV6_MULTICAST_HOST
+	if (dst->ss_family == AF_INET6) {
+		int ifindex = iface->ifindex;
+
+		if (sd6 == -1)
+			return errno = EAGAIN;
+		if (setsockopt(sd6, IPPROTO_IPV6, IPV6_MULTICAST_IF, &ifindex, sizeof(ifindex)))
+			return -1;
+
+		inet_addr6_get(&to)->sin6_scope_id = ifindex;
+		slen = sizeof(struct sockaddr_in6);
+		sd = sd6;
+	} else
+#endif
+	{
+#ifdef HAVE_STRUCT_IP_MREQN
+		struct ip_mreqn imr = { .imr_ifindex = iface->ifindex };
+#else
+		struct in_addr imr = iface->inaddr;
+#endif
+		if (sd4 == -1)
+			return errno = EAGAIN;
+		if (setsockopt(sd4, IPPROTO_IP, IP_MULTICAST_IF, &imr, sizeof(imr)))
+			return -1;
+
+		slen = sizeof(struct sockaddr_in);
+		sd = sd4;
+	}
+
+	if (sendto(sd, buf, len, 0, (struct sockaddr *)&to, slen) < 0)
+		return -1;
+
+	return 0;
+}
+
 int kern_mroute_init(int table_id, void (*cb)(int, void *), void *arg)
 {
+	unsigned char ra[4] = { IPOPT_RA, 4, 0, 0 };
 	int val = 1;
 
 	if (sd4 < 0) {
@@ -214,6 +350,27 @@ int kern_mroute_init(int table_id, void (*cb)(int, void *), void *arg)
 	/* Enable "PIM" to get WRONGVIF messages */
 	if (setsockopt(sd4, IPPROTO_IP, MRT_PIM, &val, sizeof(val)))
 		smclog(LOG_ERR, "Failed enabling PIM IGMPMSG_WRONGVIF, ignoring: %s", strerror(errno));
+
+	/* For queries, RFC 3376 §4.1.3 */
+	if (setsockopt(sd4, IPPROTO_IP, IP_OPTIONS, ra, sizeof(ra)))
+		smclog(LOG_WARNING, "Failed setting Router Alert option: %s", strerror(errno));
+	if (setsockopt(sd4, IPPROTO_IP, IP_MULTICAST_TTL, &val, sizeof(val)))
+		smclog(LOG_WARNING, "Failed setting multicast TTL: %s", strerror(errno));
+
+	/* Reports to 224.0.0.22 are delivered locally, not via the router alert chain */
+#ifdef IP_MULTICAST_ALL
+	if (setsockopt(sd4, IPPROTO_IP, IP_MULTICAST_ALL, &val, sizeof(val)))
+		smclog(LOG_WARNING, "Failed enabling IP_MULTICAST_ALL: %s", strerror(errno));
+#endif
+
+	/* Ingress interface of IGMP packets, proxy reports may come from 0.0.0.0 */
+#ifdef IP_PKTINFO
+	if (setsockopt(sd4, IPPROTO_IP, IP_PKTINFO, &val, sizeof(val)))
+		smclog(LOG_WARNING, "Failed enabling IP_PKTINFO: %s", strerror(errno));
+#elif defined(IP_RECVIF)
+	if (setsockopt(sd4, IPPROTO_IP, IP_RECVIF, &val, sizeof(val)))
+		smclog(LOG_WARNING, "Failed enabling IP_RECVIF: %s", strerror(errno));
+#endif
 
 	/* Initialize virtual interface table */
 	memset(&vif_list, 0, sizeof(vif_list));
@@ -406,8 +563,17 @@ static int proc_set_val(char *file, int val)
 }
 #endif /* Linux only */
 
+/* Hop-by-hop header with the Router Alert option, RFC 2711 */
+struct hbh_ra {
+	struct ip6_hbh        hdr;
+	struct ip6_opt_router ra;
+	uint8_t               pad[2];
+};
+
 int kern_mroute6_init(int table_id, void (*cb)(int, void *), void *arg)
 {
+	struct hbh_ra hbh = { 0 };
+	struct icmp6_filter filt;
 	int val = 1;
 
 	if (sd6 < 0) {
@@ -430,6 +596,33 @@ int kern_mroute6_init(int table_id, void (*cb)(int, void *), void *arg)
 
 	if (setsockopt(sd6, IPPROTO_IPV6, MRT6_INIT, &val, sizeof(val)))
 		goto error;
+
+	/* For queries, RFC 3810 §5 */
+	hbh.ra.ip6or_type = IP6OPT_ROUTER_ALERT;
+	hbh.ra.ip6or_len  = sizeof(hbh.ra.ip6or_value);
+	hbh.pad[0]        = IP6OPT_PADN;
+	if (setsockopt(sd6, IPPROTO_IPV6, IPV6_HOPOPTS, &hbh, sizeof(hbh)))
+		smclog(LOG_WARNING, "Failed setting Router Alert option: %s", strerror(errno));
+	if (setsockopt(sd6, IPPROTO_IPV6, IPV6_MULTICAST_HOPS, &val, sizeof(val)))
+		smclog(LOG_WARNING, "Failed setting multicast hop limit: %s", strerror(errno));
+
+#ifdef IPV6_MULTICAST_ALL
+	if (setsockopt(sd6, IPPROTO_IPV6, IPV6_MULTICAST_ALL, &val, sizeof(val)))
+		smclog(LOG_WARNING, "Failed enabling IPV6_MULTICAST_ALL: %s", strerror(errno));
+#endif
+	if (setsockopt(sd6, IPPROTO_IPV6, IPV6_RECVPKTINFO, &val, sizeof(val)))
+		smclog(LOG_WARNING, "Failed enabling IPV6_RECVPKTINFO: %s", strerror(errno));
+	if (setsockopt(sd6, IPPROTO_IPV6, IPV6_RECVHOPLIMIT, &val, sizeof(val)))
+		smclog(LOG_WARNING, "Failed enabling IPV6_RECVHOPLIMIT: %s", strerror(errno));
+
+	/* Only MLD, kernel upcalls are queued directly and bypass the filter */
+	ICMP6_FILTER_SETBLOCKALL(&filt);
+	ICMP6_FILTER_SETPASS(MLD_LISTENER_QUERY, &filt);
+	ICMP6_FILTER_SETPASS(MLD_LISTENER_REPORT, &filt);
+	ICMP6_FILTER_SETPASS(MLD_LISTENER_REDUCTION, &filt);
+	ICMP6_FILTER_SETPASS(MLDV2_LISTENER_REPORT, &filt);
+	if (setsockopt(sd6, IPPROTO_ICMPV6, ICMP6_FILTER, &filt, sizeof(filt)))
+		smclog(LOG_WARNING, "Failed setting ICMPv6 filter: %s", strerror(errno));
 
 	/* Initialize virtual interface table */
 	memset(&mif_list, 0, sizeof(mif_list));

@@ -311,7 +311,7 @@ done:
 	return rc;
 }
 
-static int conf_phyint(struct conf *conf, int enable, char *iif, int mrdisc, int threshold)
+static int conf_phyint(struct conf *conf, int enable, char *iif, int mrdisc, int threshold, int role)
 {
 	(void)conf;
 
@@ -331,7 +331,7 @@ static int conf_phyint(struct conf *conf, int enable, char *iif, int mrdisc, int
 	}
 
 	if (enable)
-		return mroute_add_vif(iif, mrdisc, threshold);
+		return mroute_add_vif(iif, mrdisc, threshold, role);
 
 	return mroute_del_vif(iif);
 }
@@ -342,7 +342,7 @@ static int conf_phyint(struct conf *conf, int enable, char *iif, int mrdisc, int
  * routes accordingly in the kernel.  Whitespace is ignored.
  *
  * Format:
- *    phyint IFNAME <enable|disable> [ttl-threshold <1-255>]
+ *    phyint IFNAME <enable|disable> [mrdisc] [upstream|downstream] [ttl-threshold <1-255>]
  *    mgroup   from IFNAME [source ADDRESS] group MCGROUP
  *    mroute   from IFNAME source ADDRESS   group MCGROUP to IFNAME [IFNAME ...]
  *    include FILEPATTERN
@@ -369,6 +369,7 @@ int conf_parse(struct conf *conf, int do_vifs)
 	while ((buf = fparseln(fp, NULL, &conf->lineno, NULL, FPARSELN_UNESCCOMM))) {
 		int   mrdisc = 0, threshold = DEFAULT_THRESHOLD;
 		int   op = 0, num = 0, enable = do_vifs;
+		int   role = PROXY_NONE;
 		char *oif[MAX_MC_VIFS];
 		char *include = NULL;
 		char *source = NULL;
@@ -423,6 +424,10 @@ int conf_parse(struct conf *conf, int do_vifs)
 				enable = 0;
 			} else if (match("mrdisc", token)) {
 				mrdisc = 1;
+			} else if (match("upstream", token)) {
+				role = PROXY_UPSTREAM;
+			} else if (match("downstream", token)) {
+				role = PROXY_DOWNSTREAM;
 			} else if (match("ttl-threshold", token)) {
 				ttl = pop_token(&line);
 			}
@@ -469,7 +474,7 @@ int conf_parse(struct conf *conf, int do_vifs)
 			break;
 
 		case PHYINT:
-			if (conf_phyint(conf, enable, iif, mrdisc, threshold))
+			if (conf_phyint(conf, enable, iif, mrdisc, threshold, role))
 				rc = -1;
 			break;
 

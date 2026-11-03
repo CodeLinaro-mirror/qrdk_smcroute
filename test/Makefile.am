@@ -1,7 +1,7 @@
 EXTRA_DIST         = adv.sh basic.sh batch.sh bridge.sh contin.sh dyn.sh expire.sh gre.sh ipv6.sh
 EXTRA_DIST        += include.sh isolated.sh join.sh joinlen.sh json.sh lib.sh
 EXTRA_DIST        += lost.sh multi.sh mem.sh mrcache.sh mrdisc.sh overlap.sh pending.sh
-EXTRA_DIST        += poison.sh reload.sh reload6.sh vlan.sh vrfy.sh wrongvif.sh
+EXTRA_DIST        += poison.sh proxy.sh querier.sh reload.sh reload6.sh upstream.sh vlan.sh vrfy.sh wrongvif.sh
 CLEANFILES         = *~ *.trs *.log
 TEST_EXTENSIONS    = .sh
 TESTS_ENVIRONMENT  = unshare -mrun --map-auto
@@ -30,8 +30,15 @@ TESTS             += multi.sh
 TESTS             += overlap.sh
 TESTS             += pending.sh
 TESTS             += poison.sh
+if USE_PROXY
+TESTS             += proxy.sh
+TESTS             += querier.sh
+endif
 TESTS             += reload.sh
 TESTS             += reload6.sh
+if USE_PROXY
+TESTS             += upstream.sh
+endif
 TESTS             += vlan.sh
 TESTS             += vrfy.sh
 TESTS             += wrongvif.sh

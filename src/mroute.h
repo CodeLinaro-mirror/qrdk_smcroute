@@ -111,11 +111,12 @@ struct mroute {
 int  mroute_init       (int table_id, int cache_tmo);
 void mroute_exit       (void);
 
-int  mroute_add_vif    (char *ifname, uint8_t mrdisc, uint8_t threshold);
+int  mroute_add_vif    (char *ifname, uint8_t mrdisc, uint8_t threshold, uint8_t role);
 int  mroute_ensure_vif (const char *ifname);
 int  mroute_del_vif    (char *ifname);
 
 void mroute_expire     (int max_idle);
+void mroute_update_group(inet_addr_t *group);
 
 int  mroute_add_route  (struct mroute *mroute);
 int  mroute_del_route  (struct mroute *mroute);

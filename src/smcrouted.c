@@ -46,6 +46,7 @@
 #include "mroute.h"
 #include "mcgroup.h"
 #include "pending.h"
+#include "proxy.h"
 
 int background = 1;
 int do_vifs    = 1;
@@ -78,6 +79,7 @@ static void clean(void)
 {
 	timer_exit();
 	ifevent_exit();
+	proxy_exit();
 	mroute_exit();
 	mcgroup_exit();
 	ipc_exit();

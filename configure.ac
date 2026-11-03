@@ -63,6 +63,8 @@ AC_ARG_ENABLE(test,
 	[ac_enable_test="no"])
 AC_ARG_ENABLE([ipv6],
 	AS_HELP_STRING([--disable-ipv6], [disable IPv6 support]))
+AC_ARG_ENABLE([proxy],
+	AS_HELP_STRING([--disable-proxy], [disable IGMP/MLD proxy support, RFC 4605]))
 AC_ARG_WITH([libcap],
 	AS_HELP_STRING([--without-libcap], [disable libcap, -p USER:GROUP drop-privs support]),,
 	[with_libcap=auto])
@@ -92,6 +94,12 @@ AS_IF([test "x$enable_mrdisc" = "xyes"],
     AC_DEFINE([ENABLE_MRDISC], 1, [Enable IPv4 multicast router discovery protocol]),
     enable_mrdisc=no)
 AM_CONDITIONAL([USE_MRDISC], [test "x$enable_mrdisc" = "xyes"])
+
+# Build w/ IGMP/MLD proxy support?
+AS_IF([test "x$enable_proxy" != "xno"], [
+    enable_proxy=yes
+    AC_DEFINE([ENABLE_PROXY], 1, [Enable IGMP/MLD proxy, RFC 4605])])
+AM_CONDITIONAL([USE_PROXY], [test "x$enable_proxy" = "xyes"])
 
 # Netlink listener for kernel link events.  Linux only, BSD route-socket
 # port tracked separately.  See src/ifevent.h.
@@ -251,6 +259,7 @@ cat <<EOF
  Optional features:
   IPv6...........: $enable_ipv6
   MRDISC RFC4286.: $enable_mrdisc
+  Proxy RFC4605..: $enable_proxy
   libcap.........: $with_libcap
   systemd........: $with_systemd
   libsystemd.....: $with_libsystemd

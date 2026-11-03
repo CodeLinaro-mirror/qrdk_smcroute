@@ -28,6 +28,10 @@ if USE_MRDISC
 smcrouted_SOURCES   += mrdisc.c mrdisc.h
 endif
 
+if USE_PROXY
+smcrouted_SOURCES   += igmp.c igmp.h mld.c mld.h proxy.c proxy.h
+endif
+
 if HAVE_NETLINK
 smcrouted_SOURCES   += ifevent_nl.c
 else

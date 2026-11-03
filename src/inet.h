@@ -73,6 +73,7 @@ int                  inet_str2addr  (const char *str, inet_addr_t *addr);
 
 int                  is_multicast   (inet_addr_t *addr);
 int                  is_anyaddr     (inet_addr_t *addr);
+int                  is_linklocal_mcast(inet_addr_t *addr);
 
 int                  inet_iter_init (struct inet_iter *iter, inet_addr_t *addr, int len);
 int                  inet_iterator  (struct inet_iter *iter, inet_addr_t *addr);

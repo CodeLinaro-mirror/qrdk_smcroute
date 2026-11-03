@@ -140,7 +140,7 @@ int inet_addr_cmp(inet_addr_t *a, inet_addr_t *b)
 		struct sockaddr_in *sa = (struct sockaddr_in *)a;
 		struct sockaddr_in *sb = (struct sockaddr_in *)b;
 
-		return sa->sin_addr.s_addr - sb->sin_addr.s_addr;
+		return memcmp(&sa->sin_addr, &sb->sin_addr, sizeof(sa->sin_addr));
 	}
 
 #ifdef HAVE_IPV6_MULTICAST_HOST
@@ -148,7 +148,7 @@ int inet_addr_cmp(inet_addr_t *a, inet_addr_t *b)
 		struct sockaddr_in6 *sa = (struct sockaddr_in6 *)a;
 		struct sockaddr_in6 *sb = (struct sockaddr_in6 *)b;
 
-		return memcmp(sa, sb, sizeof(*sa));
+		return memcmp(&sa->sin6_addr, &sb->sin6_addr, sizeof(sa->sin6_addr));
 	}
 #endif
 
@@ -258,6 +258,21 @@ int is_anyaddr(inet_addr_t *addr)
 #endif
 
 	return sin->sin_addr.s_addr == htonl(INADDR_ANY);
+}
+
+/* 224.0.0.0/24 and ff02::/16 are never routed */
+int is_linklocal_mcast(inet_addr_t *addr)
+{
+	struct sockaddr_in *sin = (struct sockaddr_in *)addr;
+
+#ifdef HAVE_IPV6_MULTICAST_HOST
+	if (addr->ss_family == AF_INET6) {
+		struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)addr;
+		return IN6_IS_ADDR_MC_LINKLOCAL(&sin6->sin6_addr);
+	}
+#endif
+
+	return (ntohl(sin->sin_addr.s_addr) & 0xffffff00) == 0xe0000000;
 }
 
 int inet_iter_init(struct inet_iter *iter, inet_addr_t *addr, int len)

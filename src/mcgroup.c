@@ -184,6 +184,56 @@ static void list_rem(int sd, struct mcgroup *mcg)
 	}
 }
 
+static void mcgroup_set(struct mcgroup *mcg, struct iface *iface, inet_addr_t *source, inet_addr_t *group)
+{
+	memset(mcg, 0, sizeof(*mcg));
+	mcg->iface = iface;
+	mcg->group = *group;
+	if (source)
+		mcg->source = *source;
+	else
+		inet_anyaddr(group->ss_family, &mcg->source);
+}
+
+/*
+ * Join a group, from @source only unless NULL, on behalf of another
+ * module.  Returns the socket holding the membership, for the leave.
+ */
+int mcgroup_join(struct iface *iface, inet_addr_t *source, inet_addr_t *group)
+{
+	struct mcgroup mcg;
+	int sd;
+
+	mcgroup_set(&mcg, iface, source, group);
+retry:
+	sd = alloc_mc_sock(group->ss_family);
+	if (sd == -1)
+		return -1;
+
+	if (kern_join_leave(sd, 1, &mcg)) {
+		free_mc_sock(sd);
+		if (errno == ENOBUFS && max_groups > 1) {
+			max_groups--;
+			goto retry;
+		}
+
+		return -1;
+	}
+
+	list_add(sd, &mcg);
+
+	return sd;
+}
+
+void mcgroup_leave(struct iface *iface, inet_addr_t *source, inet_addr_t *group, int sd)
+{
+	struct mcgroup mcg;
+
+	mcgroup_set(&mcg, iface, source, group);
+	kern_join_leave(sd, 0, &mcg);
+	list_rem(sd, &mcg);
+}
+
 void mcgroup_init(void)
 {
 	struct rlimit rlim;

@@ -45,20 +45,49 @@
 static TAILQ_HEAD(iflist, iface) iface_list = TAILQ_HEAD_INITIALIZER(iface_list);
 extern int do_vifs;
 
+/*
+ * Keep the first IPv4 and the first link-local IPv6 address of each
+ * interface.  On Linux we can enumerate VIFs using ifindex, useful
+ * for DHCP interfaces w/o any address yet.  Other UNIX systems will
+ * fail on the MRT_ADD_VIF ioctl. if the kernel cannot find a matching
+ * interface.
+ */
+static void set_addr(struct iface *iface, struct ifaddrs *ifa)
+{
+	if (!ifa->ifa_addr)
+		return;
+
+	if (ifa->ifa_addr->sa_family == AF_INET) {
+		if (!iface->inaddr.s_addr)
+			iface->inaddr = ((struct sockaddr_in *)ifa->ifa_addr)->sin_addr;
+	} else if (ifa->ifa_addr->sa_family == AF_INET6) {
+		struct in6_addr *in6 = &((struct sockaddr_in6 *)ifa->ifa_addr)->sin6_addr;
+
+		if (IN6_IS_ADDR_LINKLOCAL(in6) && IN6_IS_ADDR_UNSPECIFIED(&iface->in6addr))
+			iface->in6addr = *in6;
+	}
+}
+
 /**
  * iface_update - Check of new interfaces
  */
 void iface_update(void)
 {
 	struct ifaddrs *ifaddr, *ifa;
+	struct iface *iface;
 
 	if (getifaddrs(&ifaddr) == -1) {
 		smclog(LOG_ERR, "Failed retrieving interface addresses: %s", strerror(errno));
 		exit(EX_OSERR);
 	}
 
+	/* addresses may have gone away, start over */
+	TAILQ_FOREACH(iface, &iface_list, link) {
+		iface->inaddr.s_addr = 0;
+		memset(&iface->in6addr, 0, sizeof(iface->in6addr));
+	}
+
 	for (ifa = ifaddr; ifa; ifa = ifa->ifa_next) {
-		struct iface *iface;
 		int ifindex;
 
 		ifindex = if_nametoindex(ifa->ifa_name);
@@ -75,9 +104,7 @@ void iface_update(void)
 			}
 
 			iface->ifindex = ifindex;
-			if (!iface->inaddr.s_addr && ifa->ifa_addr && ifa->ifa_addr->sa_family == AF_INET)
-				iface->inaddr = ((struct sockaddr_in *)ifa->ifa_addr)->sin_addr;
-
+			set_addr(iface, ifa);
 			continue;
 		}
 
@@ -88,15 +115,7 @@ void iface_update(void)
 			exit(EX_OSERR);
 		}
 
-		/*
-		 * Only copy interface address if inteface has one.  On
-		 * Linux we can enumerate VIFs using ifindex, useful for
-		 * DHCP interfaces w/o any address yet.  Other UNIX
-		 * systems will fail on the MRT_ADD_VIF ioctl. if the
-		 * kernel cannot find a matching interface.
-		 */
-		if (ifa->ifa_addr && ifa->ifa_addr->sa_family == AF_INET)
-			iface->inaddr = ((struct sockaddr_in *)ifa->ifa_addr)->sin_addr;
+		set_addr(iface, ifa);
 		iface->flags = ifa->ifa_flags;
 		strlcpy(iface->ifname, ifa->ifa_name, sizeof(iface->ifname));
 		iface->ifindex = if_nametoindex(iface->ifname);

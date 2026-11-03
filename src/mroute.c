@@ -38,6 +38,9 @@
 #include "mrdisc.h"
 #include "mroute.h"
 #include "kern.h"
+#include "igmp.h"
+#include "mld.h"
+#include "proxy.h"
 #include "timer.h"
 #include "util.h"
 
@@ -70,26 +73,33 @@ static void handle_nocache4(int sd, void *arg)
 	struct mroute mroute = { 0 };
 	struct igmpmsg *im;
 	struct iface *iface;
+	struct kern_rx rx;
 	struct ip *ip;
-	char tmp[128];
+	char tmp[2048];
 	int result;
 
 	(void)arg;
-	result = read(sd, tmp, sizeof(tmp));
+	result = kern_recv(sd, tmp, sizeof(tmp), &rx);
 	if (result < 0) {
 		smclog(LOG_WARNING, "Failed reading IGMP message from kernel: %s", strerror(errno));
 		return;
 	}
 
-	ip = (struct ip *)tmp;
-
-	/* Basic validation, filter out non igmpmsg */
-	im = (struct igmpmsg *)tmp;
-	if (im->im_mbz != 0 || im->im_msgtype == 0)
+	if ((size_t)result < sizeof(*ip))
 		return;
+
+	ip = (struct ip *)tmp;
+	if (ip->ip_p == IPPROTO_IGMP) {
+		igmp_recv(rx.ifindex, (uint8_t *)tmp, result);
+		return;
+	}
 
 	/* packets sent up from kernel to daemon have ip->ip_p = 0 */
 	if (ip->ip_p != 0)
+		return;
+
+	im = (struct igmpmsg *)tmp;
+	if (im->im_msgtype == 0)
 		return;
 
 	inet_addr_set(&mroute.source, &im->im_src);
@@ -497,6 +507,8 @@ static void mfc_compute(struct mroute *kern)
 				kern->ttl[i] = conf->ttl[i];
 		}
 	}
+
+	proxy_oifs(kern);
 }
 
 /*
@@ -695,25 +707,32 @@ static void handle_nocache6(int sd, void *arg)
 	struct mroute mroute = { 0 };
 	struct mrt6msg *im6;
 	struct iface *iface;
-	char tmp[128];
+	struct kern_rx rx;
+	char tmp[2048];
 	int result;
 
 	(void)arg;
-	result = read(sd, tmp, sizeof(tmp));
+	result = kern_recv(sd, tmp, sizeof(tmp), &rx);
 	if (result < 0) {
-		smclog(LOG_INFO, "Failed clearing MLD message from kernel: %s", strerror(errno));
+		smclog(LOG_INFO, "Failed reading MLD message from kernel: %s", strerror(errno));
 		return;
 	}
 
+	if ((size_t)result < sizeof(*im6))
+		return;
+
 	/*
-	 * Basic input validation, filter out all non-mrt messages (e.g.
-	 * our join for each group).  The mrt6msg struct is overlayed on
-	 * the MLD header, so the im6_mbz field (must-be-zero) is the
-	 * MLD type, e.g. 143, and im6_msgtype is the MLD code for an
-	 * MLDv2 Join.
+	 * The mrt6msg struct is overlayed on the ICMPv6 header, so the
+	 * im6_mbz field (must-be-zero) is the ICMPv6 type, e.g. 143 for
+	 * an MLDv2 report, and im6_msgtype its code.
 	 */
 	im6 = (struct mrt6msg *)tmp;
-	if (im6->im6_mbz != 0 || im6->im6_msgtype == 0)
+	if (im6->im6_mbz != 0) {
+		mld_recv(rx.ifindex, &rx.src, rx.hlim, (uint8_t *)tmp, result);
+		return;
+	}
+
+	if (im6->im6_msgtype == 0)
 		return;
 
 	inet_addr6_set(&mroute.source, &im6->im6_src);
@@ -918,7 +937,7 @@ static int mroute_resolve(struct mroute *route)
 			break;
 	}
 
-	if (!entry) {
+	if (!entry && !proxy_oifs(route)) {
 		errno = ENOENT;
 		return -1;
 	}
@@ -977,7 +996,7 @@ void mroute_exit(void)
 }
 
 /* Used by file parser to add VIFs/MIFs after setup */
-int mroute_add_vif(char *ifname, uint8_t mrdisc, uint8_t ttl)
+int mroute_add_vif(char *ifname, uint8_t mrdisc, uint8_t ttl, uint8_t role)
 {
 	struct ifmatch state;
 	struct iface *iface;
@@ -988,6 +1007,7 @@ int mroute_add_vif(char *ifname, uint8_t mrdisc, uint8_t ttl)
 		smclog(LOG_DEBUG, "Creating/updating multicast VIF for %s TTL %d", iface->ifname, ttl);
 		iface->mrdisc    = mrdisc;
 		iface->threshold = ttl;
+		iface->proxy     = role;
 		iface->unused    = 0;
 		if (mroute4_add_vif(iface))
 			rc = -1;
@@ -995,6 +1015,7 @@ int mroute_add_vif(char *ifname, uint8_t mrdisc, uint8_t ttl)
 		if (mroute6_add_mif(iface))
 			rc = -1;
 #endif
+		proxy_sync(iface);
 	}
 
 	if (!state.match_count) {
@@ -1042,6 +1063,7 @@ int mroute_del_vif(char *ifname)
 		if (mroute6_del_mif(iface))
 			rc = -1;
 #endif
+		proxy_sync(iface);
 	}
 
 	if (!state.match_count) {
@@ -1050,6 +1072,24 @@ int mroute_del_vif(char *ifname)
 	}
 
 	return rc;
+}
+
+/* Resync kernel entries for @group, or all when NULL, after an oif source changed */
+void mroute_update_group(inet_addr_t *group)
+{
+	struct mroute *entry, *tmp;
+
+	TAILQ_FOREACH_SAFE(entry, &kern_list, link, tmp) {
+		uint8_t ttl[MAX_MC_VIFS];
+
+		if (group && inet_addr_cmp(&entry->group, group))
+			continue;
+
+		memcpy(ttl, entry->ttl, sizeof(ttl));
+		mfc_compute(entry);
+		if (memcmp(ttl, entry->ttl, sizeof(ttl)))
+			mfc_update(entry);
+	}
 }
 
 /*

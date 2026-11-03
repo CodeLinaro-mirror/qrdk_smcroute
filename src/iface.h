@@ -22,18 +22,25 @@
 #define DEFAULT_THRESHOLD 1		/* Packet TTL must be at least 1 to pass */
 #define NO_VIF   ALL_VIFS
 
+/* IGMP/MLD proxy role, RFC 4605 */
+#define PROXY_NONE       0
+#define PROXY_UPSTREAM   1
+#define PROXY_DOWNSTREAM 2
+
 struct iface {
 	TAILQ_ENTRY(iface) link;
 	int      unused;		/* set on reload/SIGHUP only */
 
 	char     ifname[IFNAMSIZ];
 	struct in_addr inaddr;		/* == 0 for non IP interfaces */
+	struct in6_addr in6addr;	/* link-local, :: if none     */
 	int      ifindex;		/* Physical interface index   */
 	short    flags;
 	vifi_t   vif;
 	mifi_t   mif;
 	uint8_t  mrdisc;		/* Enable multicast router discovery */
 	uint8_t  threshold;		/* TTL threshold: 1-255, default: 1 */
+	uint8_t  proxy;			/* Configured PROXY_ role */
 };
 
 struct ifmatch {
