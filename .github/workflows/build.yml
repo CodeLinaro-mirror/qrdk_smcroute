@@ -76,3 +76,23 @@ jobs:
         with:
           name: smcroute-test-${{ matrix.compiler }}
           path: test/*
+
+  freebsd:
+    # Verify the build on FreeBSD, the tests need Linux network namespaces
+    name: freebsd
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build on FreeBSD
+        uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          prepare: |
+            pkg install -y autoconf automake libtool pkgconf
+          run: |
+            set -e
+            ./autogen.sh
+            ./configure --enable-mrdisc
+            make -j3
+            ./src/smcrouted -h
+            ./src/smcroutectl -h
