@@ -268,6 +268,21 @@ static int local_addr(struct iface *iface, int family, inet_addr_t *addr)
 	return 1;
 }
 
+/*
+ * The address we query from: our own, or the unspecified one when we
+ * have none or are told to send proxy queries, RFC 4541 §2.1.1.1.
+ * Returns 1 for our own, 0 for a proxy query, -1 when neither works.
+ */
+static int querier_addr(struct proxy_iface *pif, int family, inet_addr_t *addr)
+{
+	if (!pif->iface->proxy_querier && local_addr(pif->iface, family, addr))
+		return 1;
+
+	inet_anyaddr(family, addr);
+
+	return kern_proxy_queries() ? 0 : -1;
+}
+
 static struct proxy_iface *pif_find(struct iface *iface)
 {
 	struct proxy_iface *pif;
@@ -628,7 +643,7 @@ static int send_query(struct proxy_iface *pif, int family, inet_addr_t *group)
 	struct querier *q = querier_of(pif, family);
 	int mrt = group ? timers[LAST_MEMBER_INTERVAL].val : response_interval(pif);
 	char g[INET_ADDRSTR_LEN] = "all";
-	inet_addr_t dst = { 0 };
+	inet_addr_t dst = { 0 }, me;
 	uint8_t buf[64];
 	size_t len;
 
@@ -643,7 +658,8 @@ static int send_query(struct proxy_iface *pif, int family, inet_addr_t *group)
 	else
 		len = igmp_build_query(buf, q->gen.cur, mrt, group, query_interval(pif), timers[ROBUSTNESS].val);
 
-	if (kern_send(pif->iface, &dst, buf, len)) {
+	querier_addr(pif, family, &me);
+	if (kern_send(pif->iface, &me, &dst, buf, len)) {
 		smclog(LOG_WARNING, "Failed sending %s query on %s: %s", family_name(family),
 		       pif->iface->ifname, strerror(errno));
 		return -1;
@@ -666,7 +682,7 @@ static void querier_tick(struct proxy_iface *pif, int family, time_t t)
 	if (iface_get_vif(family, pif->iface) == NO_VIF)
 		return;
 
-	if (!local_addr(pif->iface, family, &me)) {
+	if (querier_addr(pif, family, &me) < 0) {
 		if (q->me) {
 			smclog(LOG_INFO, "No address on %s, giving up %s querier duties",
 			       pif->iface->ifname, family_name(family));
@@ -679,7 +695,8 @@ static void querier_tick(struct proxy_iface *pif, int family, time_t t)
 		if (!is_anyaddr(&q->other) && q->expires > t)
 			return;
 
-		smclog(LOG_INFO, "Assuming %s querier duties on %s", family_name(family), pif->iface->ifname);
+		smclog(LOG_INFO, "Assuming %s %squerier duties on %s", family_name(family),
+		       is_anyaddr(&me) ? "proxy " : "", pif->iface->ifname);
 		q->me      = 1;
 		q->startup = timers[ROBUSTNESS].val;
 		q->next    = t;
@@ -914,7 +931,8 @@ void proxy_query(struct iface *iface, inet_addr_t *src, inet_addr_t *group, int 
 
 	inet_addr2str(src, s, sizeof(s));
 	if (q->me) {
-		if (!local_addr(iface, src->ss_family, &me) || inet_addr_cmp(src, &me) >= 0)
+		/* any real querier beats our proxy queries */
+		if (querier_addr(pif, src->ss_family, &me) > 0 && inet_addr_cmp(src, &me) >= 0)
 			return;
 
 		smclog(LOG_INFO, "Querier %s on %s wins, standing down", s, iface->ifname);

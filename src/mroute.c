@@ -1008,6 +1008,7 @@ int mroute_add_vif(char *ifname, const struct phyint *opt)
 		iface->mrdisc         = opt->mrdisc;
 		iface->threshold      = opt->threshold;
 		iface->proxy          = opt->proxy;
+		iface->proxy_querier  = opt->proxy_querier;
 		iface->query_interval = opt->query_interval;
 		iface->unused         = 0;
 		if (mroute4_add_vif(iface))

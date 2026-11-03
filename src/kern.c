@@ -32,6 +32,10 @@
 #include <netinet/icmp6.h>
 #include <netinet/ip6.h>
 #endif
+#ifdef __linux__
+#include <net/ethernet.h>
+#include <netpacket/packet.h>
+#endif
 
 #include "iface.h"
 #include "kern.h"
@@ -51,6 +55,22 @@ static int sd4 = -1;
  * Receives MLD packets and upcall messages from the kenrel.
  */
 static int sd6 = -1;
+
+/* Router Alert for queries, RFC 3376 §4.1.3 and RFC 3810 §5 */
+static const uint8_t ra4[4] = { IPOPT_RA, 4, 0, 0 };
+#ifdef HAVE_IPV6_MULTICAST_HOST
+/* Hop-by-hop header with the Router Alert option, RFC 2711 */
+struct hbh_ra {
+	struct ip6_hbh        hdr;
+	struct ip6_opt_router ra;
+	uint8_t               pad[2];
+};
+static const struct hbh_ra ra6 = {
+	.hdr = { .ip6h_nxt = IPPROTO_ICMPV6 },
+	.ra  = { .ip6or_type = IP6OPT_ROUTER_ALERT, .ip6or_len = 2 },
+	.pad = { IP6OPT_PADN, 0 },
+};
+#endif
 
 /* IPv4 internal virtual interfaces (VIF) descriptor vector */
 static struct {
@@ -280,11 +300,135 @@ ssize_t kern_recv(int sd, void *buf, size_t len, struct kern_rx *rx)
  * Send a query or report on @iface from the mrouted socket of @dst's family.
  * The sockets carry the Router Alert option and hop limit 1.
  */
-int kern_send(struct iface *iface, inet_addr_t *dst, const void *buf, size_t len)
+#if defined(__linux__) && defined(ENABLE_PROXY)
+/* Packet socket for queries from 0.0.0.0 and ::, send only */
+static int sdp = -1;
+
+int kern_proxy_queries(void)
+{
+	return sdp != -1;
+}
+
+/* ICMPv6 checksum with the pseudo-header, RFC 8200 §8.1 */
+static uint16_t icmp6_cksum(const struct ip6_hdr *ip6, const void *buf, size_t len)
+{
+	struct {
+		struct in6_addr src, dst;
+		uint32_t        len;
+		uint8_t         zero[3], nxt;
+	} ph = { ip6->ip6_src, ip6->ip6_dst, htonl(len), { 0 }, IPPROTO_ICMPV6 };
+	uint32_t sum;
+
+	sum  = (uint16_t)~inet_cksum(&ph, sizeof(ph));
+	sum += (uint16_t)~inet_cksum(buf, len);
+	sum  = (sum >> 16) + (sum & 0xffff);
+
+	return ~sum;
+}
+
+/* Queries from 0.0.0.0 and ::, Linux fills in the address on raw IP sockets */
+static int send_raw(struct iface *iface, inet_addr_t *dst, const void *buf, size_t len)
+{
+	struct sockaddr_ll sll = {
+		.sll_family  = AF_PACKET,
+		.sll_ifindex = iface->ifindex,
+		.sll_halen   = ETH_ALEN,
+	};
+	uint8_t pkt[256];
+	size_t hlen;
+
+	if (sdp == -1)
+		return errno = EAGAIN;
+
+#ifdef HAVE_IPV6_MULTICAST_HOST
+	if (dst->ss_family == AF_INET6) {
+		struct ip6_hdr *ip6 = (struct ip6_hdr *)pkt;
+		struct icmp6_hdr *icmp6;
+		const uint8_t *d;
+
+		hlen = sizeof(*ip6) + sizeof(ra6);
+		if (hlen + len > sizeof(pkt))
+			return errno = EMSGSIZE;
+
+		memset(ip6, 0, sizeof(*ip6));
+		ip6->ip6_flow = htonl(6 << 28);
+		ip6->ip6_plen = htons(sizeof(ra6) + len);
+		ip6->ip6_nxt  = IPPROTO_HOPOPTS;
+		ip6->ip6_hlim = 1;
+		ip6->ip6_dst  = inet_addr6_get(dst)->sin6_addr;
+		memcpy(ip6 + 1, &ra6, sizeof(ra6));
+
+		icmp6 = memcpy(pkt + hlen, buf, len);
+		icmp6->icmp6_cksum = 0;
+		icmp6->icmp6_cksum = icmp6_cksum(ip6, icmp6, len);
+
+		/* RFC 2464 §7 */
+		d = ip6->ip6_dst.s6_addr;
+		sll.sll_protocol = htons(ETH_P_IPV6);
+		memcpy(sll.sll_addr, (uint8_t []){ 0x33, 0x33, d[12], d[13], d[14], d[15] }, ETH_ALEN);
+	} else
+#endif
+	{
+		struct ip *ip = (struct ip *)pkt;
+		uint32_t d;
+
+		hlen = sizeof(*ip) + sizeof(ra4);
+		if (hlen + len > sizeof(pkt))
+			return errno = EMSGSIZE;
+
+		memset(ip, 0, sizeof(*ip));
+		ip->ip_v   = 4;
+		ip->ip_hl  = hlen / 4;
+		ip->ip_tos = IPTOS_PREC_INTERNETCONTROL;
+		ip->ip_len = htons(hlen + len);
+		ip->ip_ttl = 1;
+		ip->ip_p   = IPPROTO_IGMP;
+		ip->ip_dst = *inet_addr_get(dst);
+		memcpy(ip + 1, ra4, sizeof(ra4));
+		ip->ip_sum = inet_cksum(ip, hlen);
+		memcpy(pkt + hlen, buf, len);
+
+		/* RFC 1112 §6.4 */
+		d = ntohl(ip->ip_dst.s_addr);
+		sll.sll_protocol = htons(ETH_P_IP);
+		memcpy(sll.sll_addr, (uint8_t []){ 0x01, 0x00, 0x5e, (d >> 16) & 0x7f, d >> 8, d }, ETH_ALEN);
+	}
+
+	if (sendto(sdp, pkt, hlen + len, 0, (struct sockaddr *)&sll, sizeof(sll)) < 0)
+		return -1;
+
+	return 0;
+}
+#else
+int kern_proxy_queries(void)
+{
+	return 0;
+}
+
+static int send_raw(struct iface *iface, inet_addr_t *dst, const void *buf, size_t len)
+{
+	(void)iface;
+	(void)dst;
+	(void)buf;
+	(void)len;
+
+	return errno = EOPNOTSUPP;
+}
+#endif
+
+/*
+ * Send an IGMP or MLD message on @iface from @src to @dst.  The raw
+ * sockets carry the Router Alert option and hop limit 1 and use the
+ * interface address, an unspecified @src goes out as a proxy query.
+ */
+int kern_send(struct iface *iface, inet_addr_t *src, inet_addr_t *dst, const void *buf, size_t len)
 {
 	inet_addr_t to = *dst;
 	socklen_t slen;
 	int sd;
+
+	if (is_anyaddr(src))
+		return send_raw(iface, dst, buf, len);
 
 #ifdef HAVE_IPV6_MULTICAST_HOST
 	if (dst->ss_family == AF_INET6) {
@@ -323,7 +467,6 @@ int kern_send(struct iface *iface, inet_addr_t *dst, const void *buf, size_t len
 
 int kern_mroute_init(int table_id, void (*cb)(int, void *), void *arg)
 {
-	unsigned char ra[4] = { IPOPT_RA, 4, 0, 0 };
 	int val = 1;
 
 	if (sd4 < 0) {
@@ -331,6 +474,15 @@ int kern_mroute_init(int table_id, void (*cb)(int, void *), void *arg)
 		if (sd4 < 0)
 			return -1;
 	}
+
+#if defined(__linux__) && defined(ENABLE_PROXY)
+	/* send only, protocol 0 receives nothing, needs CAP_NET_RAW before dropping root */
+	if (sdp < 0) {
+		sdp = socket(AF_PACKET, SOCK_DGRAM, 0);
+		if (sdp < 0)
+			smclog(LOG_WARNING, "Failed creating packet socket, no proxy queries: %s", strerror(errno));
+	}
+#endif
 
 #ifdef MRT_TABLE /* Currently only available on Linux  */
 	if (table_id != 0) {
@@ -352,7 +504,7 @@ int kern_mroute_init(int table_id, void (*cb)(int, void *), void *arg)
 		smclog(LOG_ERR, "Failed enabling PIM IGMPMSG_WRONGVIF, ignoring: %s", strerror(errno));
 
 	/* For queries, RFC 3376 §4.1.3 */
-	if (setsockopt(sd4, IPPROTO_IP, IP_OPTIONS, ra, sizeof(ra)))
+	if (setsockopt(sd4, IPPROTO_IP, IP_OPTIONS, ra4, sizeof(ra4)))
 		smclog(LOG_WARNING, "Failed setting Router Alert option: %s", strerror(errno));
 	if (setsockopt(sd4, IPPROTO_IP, IP_MULTICAST_TTL, &val, sizeof(val)))
 		smclog(LOG_WARNING, "Failed setting multicast TTL: %s", strerror(errno));
@@ -395,6 +547,11 @@ int kern_mroute_exit(void)
 
 	socket_close(sd4);
 	sd4 = -1;
+#if defined(__linux__) && defined(ENABLE_PROXY)
+	if (sdp != -1)
+		close(sdp);
+	sdp = -1;
+#endif
 
 	return 0;
 }
@@ -563,16 +720,8 @@ static int proc_set_val(char *file, int val)
 }
 #endif /* Linux only */
 
-/* Hop-by-hop header with the Router Alert option, RFC 2711 */
-struct hbh_ra {
-	struct ip6_hbh        hdr;
-	struct ip6_opt_router ra;
-	uint8_t               pad[2];
-};
-
 int kern_mroute6_init(int table_id, void (*cb)(int, void *), void *arg)
 {
-	struct hbh_ra hbh = { 0 };
 	struct icmp6_filter filt;
 	int val = 1;
 
@@ -597,11 +746,8 @@ int kern_mroute6_init(int table_id, void (*cb)(int, void *), void *arg)
 	if (setsockopt(sd6, IPPROTO_IPV6, MRT6_INIT, &val, sizeof(val)))
 		goto error;
 
-	/* For queries, RFC 3810 §5 */
-	hbh.ra.ip6or_type = IP6OPT_ROUTER_ALERT;
-	hbh.ra.ip6or_len  = sizeof(hbh.ra.ip6or_value);
-	hbh.pad[0]        = IP6OPT_PADN;
-	if (setsockopt(sd6, IPPROTO_IPV6, IPV6_HOPOPTS, &hbh, sizeof(hbh)))
+	/* For queries, RFC 3810 §5, the kernel sets the next header */
+	if (setsockopt(sd6, IPPROTO_IPV6, IPV6_HOPOPTS, &ra6, sizeof(ra6)))
 		smclog(LOG_WARNING, "Failed setting Router Alert option: %s", strerror(errno));
 	if (setsockopt(sd6, IPPROTO_IPV6, IPV6_MULTICAST_HOPS, &val, sizeof(val)))
 		smclog(LOG_WARNING, "Failed setting multicast hop limit: %s", strerror(errno));

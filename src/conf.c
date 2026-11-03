@@ -348,7 +348,7 @@ static int conf_phyint(struct conf *conf, int enable, char *iif, const struct ph
  *    global-last-member-interval <1-1024>
  *    robustness <2-10>
  *    router-timeout <1-1024>
- *    phyint IFNAME <enable|disable> [mrdisc] [upstream|downstream] [ttl-threshold <1-255>] [query-interval <1-1024>]
+ *    phyint IFNAME <enable|disable> [mrdisc] [upstream|downstream] [proxy-querier] [ttl-threshold <1-255>] [query-interval <1-1024>]
  *    mgroup   from IFNAME [source ADDRESS] group MCGROUP
  *    mroute   from IFNAME source ADDRESS   group MCGROUP to IFNAME [IFNAME ...]
  *    include FILEPATTERN
@@ -439,6 +439,8 @@ int conf_parse(struct conf *conf, int do_vifs)
 				opt.proxy = PROXY_UPSTREAM;
 			} else if (match("downstream", token)) {
 				opt.proxy = PROXY_DOWNSTREAM;
+			} else if (match("proxy-querier", token)) {
+				opt.proxy_querier = 1;
 			} else if (match("ttl-threshold", token)) {
 				ttl = pop_token(&line);
 			} else if (match("query-interval", token)) {

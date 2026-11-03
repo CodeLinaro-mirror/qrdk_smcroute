@@ -41,6 +41,7 @@ struct iface {
 	uint8_t  mrdisc;		/* Enable multicast router discovery */
 	uint8_t  threshold;		/* TTL threshold: 1-255, default: 1 */
 	uint8_t  proxy;			/* Configured PROXY_ role */
+	uint8_t  proxy_querier;		/* Query from 0.0.0.0 and :: */
 	uint16_t query_interval;	/* Querier interval, 0: global */
 };
 
@@ -49,6 +50,7 @@ struct phyint {
 	uint8_t  mrdisc;
 	uint8_t  threshold;
 	uint8_t  proxy;
+	uint8_t  proxy_querier;
 	uint16_t query_interval;
 };
 
