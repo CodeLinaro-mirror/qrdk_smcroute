@@ -33,6 +33,8 @@ struct mroute;
  */
 
 #ifdef ENABLE_PROXY
+void proxy_conf_reset(void);
+int  proxy_conf      (const char *keyword, const char *arg);
 void proxy_exit      (void);
 
 void proxy_sync      (struct iface *iface);
@@ -45,6 +47,8 @@ void proxy_include   (struct iface *iface, inet_addr_t *src, inet_addr_t *group,
 void proxy_block     (struct iface *iface, inet_addr_t *src, inet_addr_t *group, inet_addr_t *srcs, int num);
 void proxy_leave     (struct iface *iface, inet_addr_t *src, inet_addr_t *group, int gen);
 #else
+#define proxy_conf_reset()
+#define proxy_conf(keyword, arg) 0
 #define proxy_exit()
 #define proxy_sync(iface)
 #define proxy_oifs(kern)        0

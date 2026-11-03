@@ -996,7 +996,7 @@ void mroute_exit(void)
 }
 
 /* Used by file parser to add VIFs/MIFs after setup */
-int mroute_add_vif(char *ifname, uint8_t mrdisc, uint8_t ttl, uint8_t role)
+int mroute_add_vif(char *ifname, const struct phyint *opt)
 {
 	struct ifmatch state;
 	struct iface *iface;
@@ -1004,11 +1004,12 @@ int mroute_add_vif(char *ifname, uint8_t mrdisc, uint8_t ttl, uint8_t role)
 
 	iface_match_init(&state);
 	while ((iface = iface_match_by_name(ifname, 1, &state))) {
-		smclog(LOG_DEBUG, "Creating/updating multicast VIF for %s TTL %d", iface->ifname, ttl);
-		iface->mrdisc    = mrdisc;
-		iface->threshold = ttl;
-		iface->proxy     = role;
-		iface->unused    = 0;
+		smclog(LOG_DEBUG, "Creating/updating multicast VIF for %s TTL %d", iface->ifname, opt->threshold);
+		iface->mrdisc         = opt->mrdisc;
+		iface->threshold      = opt->threshold;
+		iface->proxy          = opt->proxy;
+		iface->query_interval = opt->query_interval;
+		iface->unused         = 0;
 		if (mroute4_add_vif(iface))
 			rc = -1;
 #ifdef HAVE_IPV6_MULTICAST_ROUTING

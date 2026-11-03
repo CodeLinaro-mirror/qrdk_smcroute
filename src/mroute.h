@@ -111,7 +111,8 @@ struct mroute {
 int  mroute_init       (int table_id, int cache_tmo);
 void mroute_exit       (void);
 
-int  mroute_add_vif    (char *ifname, uint8_t mrdisc, uint8_t threshold, uint8_t role);
+struct phyint;
+int  mroute_add_vif    (char *ifname, const struct phyint *opt);
 int  mroute_ensure_vif (const char *ifname);
 int  mroute_del_vif    (char *ifname);
 

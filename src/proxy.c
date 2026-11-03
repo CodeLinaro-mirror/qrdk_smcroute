@@ -36,15 +36,19 @@
 #include "timer.h"
 #include "util.h"
 
-/* RFC 3376 §8 and RFC 3810 §9 defaults, in seconds */
-#define ROBUSTNESS      2
-#define QUERY_INTERVAL  125
-#define QUERY_RESPONSE  10
-#define LAST_MEMBER_INTERVAL 1
-#define STARTUP_INTERVAL     (QUERY_INTERVAL / 4)
-#define GROUP_INTERVAL       (ROBUSTNESS * QUERY_INTERVAL + QUERY_RESPONSE)
-#define OTHER_QUERIER_INTERVAL (ROBUSTNESS * QUERY_INTERVAL + QUERY_RESPONSE / 2)
-#define LAST_MEMBER_TIME     (ROBUSTNESS * LAST_MEMBER_INTERVAL)
+/* smcroute.conf querier settings, timers in seconds, RFC 3376 §8 */
+enum { QUERY_INTERVAL, RESPONSE_INTERVAL, LAST_MEMBER_INTERVAL, ROBUSTNESS, ROUTER_TIMEOUT };
+
+static struct {
+	const char *keyword;
+	int val, def, min, max;
+} timers[] = {
+	[QUERY_INTERVAL]       = { "global-query-interval",       125, 125, 1, 1024 },
+	[RESPONSE_INTERVAL]    = { "global-response-interval",     10,  10, 1, 1024 },
+	[LAST_MEMBER_INTERVAL] = { "global-last-member-interval",   1,   1, 1, 1024 },
+	[ROBUSTNESS]           = { "robustness",                    2,   2, 2,   10 },
+	[ROUTER_TIMEOUT]       = { "router-timeout",                0,   0, 1, 1024 }, /* 0: derived */
+};
 
 /* Joined on downstream interfaces to receive what hosts send to routers */
 static const char *control_groups[] = {
@@ -121,6 +125,76 @@ static TAILQ_HEAD(, upjoin) upjoin_list = TAILQ_HEAD_INITIALIZER(upjoin_list);
 static struct proxy_iface *upstream;
 
 
+void proxy_conf_reset(void)
+{
+	size_t i;
+
+	for (i = 0; i < NELEMS(timers); i++)
+		timers[i].val = timers[i].def;
+}
+
+/* Returns 0 if @keyword is not a timer, 1 when set, -1 when @arg is out of range */
+int proxy_conf(const char *keyword, const char *arg)
+{
+	size_t i;
+	int val;
+
+	for (i = 0; i < NELEMS(timers); i++) {
+		if (strcmp(timers[i].keyword, keyword))
+			continue;
+
+		val = arg ? atoi(arg) : 0;
+		if (val < timers[i].min || val > timers[i].max)
+			return -1;
+
+		timers[i].val = val;
+		return 1;
+	}
+
+	return 0;
+}
+
+static int query_interval(struct proxy_iface *pif)
+{
+	if (pif->iface->query_interval)
+		return pif->iface->query_interval;
+
+	return timers[QUERY_INTERVAL].val;
+}
+
+/* Must not exceed the query interval, RFC 3376 §8.3 */
+static int response_interval(struct proxy_iface *pif)
+{
+	return MIN(timers[RESPONSE_INTERVAL].val, query_interval(pif));
+}
+
+/* Group membership interval, RFC 3376 §8.4 */
+static int group_interval(struct proxy_iface *pif)
+{
+	return timers[ROBUSTNESS].val * query_interval(pif) + response_interval(pif);
+}
+
+/* Other querier present interval, RFC 3376 §8.5 */
+static int other_querier_interval(struct proxy_iface *pif)
+{
+	if (timers[ROUTER_TIMEOUT].val)
+		return timers[ROUTER_TIMEOUT].val;
+
+	return timers[ROBUSTNESS].val * query_interval(pif) + response_interval(pif) / 2;
+}
+
+/* Startup query interval, RFC 3376 §8.6 */
+static int startup_interval(struct proxy_iface *pif)
+{
+	return MAX(query_interval(pif) / 4, 1);
+}
+
+/* Last member query time, RFC 3376 §8.8 and §8.9 */
+static int last_member_time(void)
+{
+	return timers[ROBUSTNESS].val * timers[LAST_MEMBER_INTERVAL].val;
+}
+
 static time_t now(void)
 {
 	struct timespec ts;
@@ -147,13 +221,13 @@ static void lower(time_t *expires, time_t to)
 }
 
 /* Older version seen, RFC 3376 §7.2.1 and §7.3.2 */
-static void gen_seen(struct gen *g, int gen, time_t t)
+static void gen_seen(struct gen *g, int gen, time_t expires)
 {
 	if (gen == 3 || gen > g->cur)
 		return;
 
 	g->cur     = gen;
-	g->expires = t + GROUP_INTERVAL;
+	g->expires = expires;
 }
 
 static void gen_tick(struct gen *g, time_t t)
@@ -552,7 +626,7 @@ int proxy_oifs(struct mroute *kern)
 static int send_query(struct proxy_iface *pif, int family, inet_addr_t *group)
 {
 	struct querier *q = querier_of(pif, family);
-	int mrt = group ? LAST_MEMBER_INTERVAL : QUERY_RESPONSE;
+	int mrt = group ? timers[LAST_MEMBER_INTERVAL].val : response_interval(pif);
 	char g[INET_ADDRSTR_LEN] = "all";
 	inet_addr_t dst = { 0 };
 	uint8_t buf[64];
@@ -565,9 +639,9 @@ static int send_query(struct proxy_iface *pif, int family, inet_addr_t *group)
 		inet_str2addr(family == AF_INET6 ? "ff02::1" : "224.0.0.1", &dst);
 
 	if (family == AF_INET6)
-		len = mld_build_query(buf, q->gen.cur, mrt, group, QUERY_INTERVAL, ROBUSTNESS);
+		len = mld_build_query(buf, q->gen.cur, mrt, group, query_interval(pif), timers[ROBUSTNESS].val);
 	else
-		len = igmp_build_query(buf, q->gen.cur, mrt, group, QUERY_INTERVAL, ROBUSTNESS);
+		len = igmp_build_query(buf, q->gen.cur, mrt, group, query_interval(pif), timers[ROBUSTNESS].val);
 
 	if (kern_send(pif->iface, &dst, buf, len)) {
 		smclog(LOG_WARNING, "Failed sending %s query on %s: %s", family_name(family),
@@ -607,7 +681,7 @@ static void querier_tick(struct proxy_iface *pif, int family, time_t t)
 
 		smclog(LOG_INFO, "Assuming %s querier duties on %s", family_name(family), pif->iface->ifname);
 		q->me      = 1;
-		q->startup = ROBUSTNESS;
+		q->startup = timers[ROBUSTNESS].val;
 		q->next    = t;
 	}
 
@@ -622,7 +696,7 @@ static void querier_tick(struct proxy_iface *pif, int family, time_t t)
 
 	if (q->startup)
 		q->startup--;
-	q->next = t + (q->startup ? STARTUP_INTERVAL : QUERY_INTERVAL);
+	q->next = t + (q->startup ? startup_interval(pif) : query_interval(pif));
 }
 
 /*
@@ -653,7 +727,7 @@ static void sweep(void *arg)
 			int changed = 0;
 
 			gen_tick(&m->gen, t);
-			if (burst_due(&m->query, t, LAST_MEMBER_INTERVAL))
+			if (burst_due(&m->query, t, timers[LAST_MEMBER_INTERVAL].val))
 				send_query(pif, group.ss_family, &group);
 
 			TAILQ_FOREACH_SAFE(s, &m->sources, link, stmp) {
@@ -780,8 +854,15 @@ void proxy_sync(struct iface *iface)
 	}
 
 	pif = pif_find(iface);
-	if (pif && pif->role == role)
+	if (pif && pif->role == role) {
+		time_t t = now();
+		size_t i;
+
+		/* a shorter query interval takes effect at once */
+		for (i = 0; i < NELEMS(pif->querier); i++)
+			lower(&pif->querier[i].next, t + query_interval(pif));
 		return;
+	}
 
 	if (pif)
 		pif_del(pif);
@@ -826,7 +907,7 @@ void proxy_query(struct iface *iface, inet_addr_t *src, inet_addr_t *group, int 
 		return;
 
 	q = querier_of(pif, src->ss_family);
-	gen_seen(&q->gen, gen, t);
+	gen_seen(&q->gen, gen, t + group_interval(pif));
 
 	if (pif->role != PROXY_DOWNSTREAM)
 		return;
@@ -847,14 +928,14 @@ void proxy_query(struct iface *iface, inet_addr_t *src, inet_addr_t *group, int 
 	}
 
 	q->other   = *src;
-	q->expires = t + OTHER_QUERIER_INTERVAL;
+	q->expires = t + other_querier_interval(pif);
 
 	if (is_anyaddr(group))
 		return;
 
 	m = member_find(pif, group);
 	if (m && m->exclude)
-		lower(&m->expires, t + ROBUSTNESS * mrt);
+		lower(&m->expires, t + timers[ROBUSTNESS].val * mrt);
 }
 
 /* IGMPv1/v2 and MLDv1 report, or a v3 EXCLUDE record: any source wanted */
@@ -874,9 +955,9 @@ void proxy_report(struct iface *iface, inet_addr_t *src, inet_addr_t *group, int
 	if (!m)
 		return;
 
-	m->expires    = t + GROUP_INTERVAL;
+	m->expires    = t + group_interval(pif);
 	m->query.left = 0;
-	gen_seen(&m->gen, gen, t);
+	gen_seen(&m->gen, gen, m->expires);
 
 	smclog(LOG_INFO, "Member report for %s from %s on %s, v%d", inet_addr2str(group, g, sizeof(g)),
 	       inet_addr2str(src, s, sizeof(s)), iface->ifname, gen);
@@ -903,7 +984,7 @@ void proxy_include(struct iface *iface, inet_addr_t *src, inet_addr_t *group, in
 	if (!m)
 		return;
 
-	expires = now() + GROUP_INTERVAL;
+	expires = now() + group_interval(pif);
 	for (i = 0; i < num; i++) {
 		if (source_refresh(m, &srcs[i], expires))
 			changed = 1;
@@ -946,7 +1027,7 @@ static struct member *leaving(struct iface *iface, inet_addr_t *src, inet_addr_t
 			smclog(LOG_INFO, "Leave for %s from %s on %s, querying the group",
 			       inet_addr2str(group, g, sizeof(g)), inet_addr2str(src, s, sizeof(s)),
 			       iface->ifname);
-			m->query.left = ROBUSTNESS;
+			m->query.left = timers[ROBUSTNESS].val;
 			m->query.next = t;
 		}
 
@@ -967,7 +1048,7 @@ void proxy_leave(struct iface *iface, inet_addr_t *src, inet_addr_t *group, int 
 
 	m = leaving(iface, src, group, gen, t);
 	if (m && m->exclude)
-		lower(&m->expires, t + LAST_MEMBER_TIME);
+		lower(&m->expires, t + last_member_time());
 }
 
 /* IGMPv3 or MLDv2 BLOCK record: these sources no longer wanted */
@@ -986,7 +1067,7 @@ void proxy_block(struct iface *iface, inet_addr_t *src, inet_addr_t *group, inet
 
 		s = source_find(m, &srcs[i]);
 		if (s)
-			lower(&s->expires, t + LAST_MEMBER_TIME);
+			lower(&s->expires, t + last_member_time());
 	}
 }
 

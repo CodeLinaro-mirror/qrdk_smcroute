@@ -36,6 +36,7 @@
 #include "iface.h"
 #include "mroute.h"
 #include "pending.h"
+#include "proxy.h"
 #include "script.h"
 #include "mcgroup.h"
 #include "util.h"
@@ -311,7 +312,7 @@ done:
 	return rc;
 }
 
-static int conf_phyint(struct conf *conf, int enable, char *iif, int mrdisc, int threshold, int role)
+static int conf_phyint(struct conf *conf, int enable, char *iif, const struct phyint *opt)
 {
 	(void)conf;
 
@@ -331,7 +332,7 @@ static int conf_phyint(struct conf *conf, int enable, char *iif, int mrdisc, int
 	}
 
 	if (enable)
-		return mroute_add_vif(iif, mrdisc, threshold, role);
+		return mroute_add_vif(iif, opt);
 
 	return mroute_del_vif(iif);
 }
@@ -342,7 +343,12 @@ static int conf_phyint(struct conf *conf, int enable, char *iif, int mrdisc, int
  * routes accordingly in the kernel.  Whitespace is ignored.
  *
  * Format:
- *    phyint IFNAME <enable|disable> [mrdisc] [upstream|downstream] [ttl-threshold <1-255>]
+ *    global-query-interval <1-1024>
+ *    global-response-interval <1-1024>
+ *    global-last-member-interval <1-1024>
+ *    robustness <2-10>
+ *    router-timeout <1-1024>
+ *    phyint IFNAME <enable|disable> [mrdisc] [upstream|downstream] [ttl-threshold <1-255>] [query-interval <1-1024>]
  *    mgroup   from IFNAME [source ADDRESS] group MCGROUP
  *    mroute   from IFNAME source ADDRESS   group MCGROUP to IFNAME [IFNAME ...]
  *    include FILEPATTERN
@@ -367,16 +373,17 @@ int conf_parse(struct conf *conf, int do_vifs)
 	}
 
 	while ((buf = fparseln(fp, NULL, &conf->lineno, NULL, FPARSELN_UNESCCOMM))) {
-		int   mrdisc = 0, threshold = DEFAULT_THRESHOLD;
+		struct phyint opt = { .threshold = DEFAULT_THRESHOLD };
 		int   op = 0, num = 0, enable = do_vifs;
-		int   role = PROXY_NONE;
 		char *oif[MAX_MC_VIFS];
 		char *include = NULL;
 		char *source = NULL;
 		char *group  = NULL;
 		char *iif = NULL;
 		char *ttl = NULL;
+		char *interval = NULL;
 		char *token;
+		int   timer;
 		glob_t gl;
 		size_t i;
 
@@ -403,6 +410,10 @@ int conf_parse(struct conf *conf, int do_vifs)
 					include = pop_token(&line);
 					smclog(LOG_DEBUG, "Found include --> %s", include);
 					break;
+				} else if ((timer = proxy_conf(token, pop_token(&line)))) {
+					if (timer < 0)
+						WARN("%s: value out of range", token);
+					goto next;
 				} else {
 					WARN("Unknown command %s, skipping.", token);
 					goto next;
@@ -423,13 +434,15 @@ int conf_parse(struct conf *conf, int do_vifs)
 			} else if (match("disable", token)) {
 				enable = 0;
 			} else if (match("mrdisc", token)) {
-				mrdisc = 1;
+				opt.mrdisc = 1;
 			} else if (match("upstream", token)) {
-				role = PROXY_UPSTREAM;
+				opt.proxy = PROXY_UPSTREAM;
 			} else if (match("downstream", token)) {
-				role = PROXY_DOWNSTREAM;
+				opt.proxy = PROXY_DOWNSTREAM;
 			} else if (match("ttl-threshold", token)) {
 				ttl = pop_token(&line);
+			} else if (match("query-interval", token)) {
+				interval = pop_token(&line);
 			}
 		}
 
@@ -456,7 +469,16 @@ int conf_parse(struct conf *conf, int do_vifs)
 			if (val < 1 || val > 255)
 				WARN("phyint %s ttl %s out of range (1-255)", iif ? iif : "", ttl);
 			else
-				threshold = val;
+				opt.threshold = val;
+		}
+
+		if (interval) {
+			int val = atoi(interval);
+
+			if (val < 1 || val > 1024)
+				WARN("phyint %s query-interval %s out of range (1-1024)", iif ? iif : "", interval);
+			else
+				opt.query_interval = val;
 		}
 
 		switch (op) {
@@ -474,7 +496,7 @@ int conf_parse(struct conf *conf, int do_vifs)
 			break;
 
 		case PHYINT:
-			if (conf_phyint(conf, enable, iif, mrdisc, threshold, role))
+			if (conf_phyint(conf, enable, iif, &opt))
 				rc = -1;
 			break;
 
@@ -514,6 +536,7 @@ int conf_read(char *file, int do_vifs)
 {
 	struct conf conf = { .file = file };
 
+	proxy_conf_reset();
 	if (conf_parse(&conf, do_vifs)) {
 		if (errno == EOPNOTSUPP)
 			smclog(LOG_WARNING, "Parse error in %s", file);

@@ -41,6 +41,15 @@ struct iface {
 	uint8_t  mrdisc;		/* Enable multicast router discovery */
 	uint8_t  threshold;		/* TTL threshold: 1-255, default: 1 */
 	uint8_t  proxy;			/* Configured PROXY_ role */
+	uint16_t query_interval;	/* Querier interval, 0: global */
+};
+
+/* phyint options from smcroute.conf, copied into struct iface */
+struct phyint {
+	uint8_t  mrdisc;
+	uint8_t  threshold;
+	uint8_t  proxy;
+	uint16_t query_interval;
 };
 
 struct ifmatch {
