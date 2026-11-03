@@ -45,7 +45,8 @@ AC_CHECK_FUNCS([atexit clock_gettime dup2 memset select setenv socket strchr \
 	strdup strerror strncasecmp strrchr asprintf])
 
 # Check for usually missing API's
-AC_REPLACE_FUNCS([strlcpy strlcat tempfile utimensat])
+AC_SEARCH_LIBS([fparseln], [util])
+AC_REPLACE_FUNCS([fparseln strlcpy strlcat tempfile utimensat])
 AC_CONFIG_LIBOBJ_DIR([lib])
 
 # Check for sun_len in struct sockaddr_un and sin_len in sockaddr_in
@@ -70,7 +71,7 @@ AC_ARG_WITH([systemd],
 	[with_systemd=auto])
 
 # Checks for header files.
-AC_CHECK_HEADERS([arpa/inet.h fcntl.h glob.h ifaddrs.h limits.h linux/sockios.h \
+AC_CHECK_HEADERS([arpa/inet.h fcntl.h glob.h ifaddrs.h libutil.h limits.h linux/sockios.h util.h \
 	net/if.h netinet/in.h netinet/in_var.h netinet6/in6_var.h net/route.h   \
 	paths.h stddef.h                                                        \
 	sys/capability.h sys/ioctl.h sys/param.h sys/prctl.h sys/socket.h       \

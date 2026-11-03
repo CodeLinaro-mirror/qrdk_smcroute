@@ -25,6 +25,11 @@
 #include <arpa/inet.h>
 #include <net/if.h>
 #include <netinet/in.h>
+#ifdef HAVE_LIBUTIL_H
+#include <libutil.h>
+#elif defined(HAVE_UTIL_H)
+#include <util.h>
+#endif
 
 #include "log.h"
 #include "conf.h"
@@ -35,18 +40,17 @@
 #include "mcgroup.h"
 #include "util.h"
 
-#define MAX_LINE_LEN 512
 
 #define DEBUG(fmt, args...) do {					\
 	if (conf)							\
-		smclog(LOG_DEBUG, "%s line %d: " fmt, conf->file,	\
+		smclog(LOG_DEBUG, "%s line %zu: " fmt, conf->file,	\
 		       conf->lineno, ##args);				\
 	else								\
 		smclog(LOG_DEBUG, "ipc: " fmt, ##args);			\
 	} while (0)
 #define INFO(fmt, args...) do {						\
 	if (conf)							\
-		smclog(LOG_INFO, "%s line %d: " fmt, conf->file,	\
+		smclog(LOG_INFO, "%s line %zu: " fmt, conf->file,	\
 			conf->lineno, ##args);				\
 	else								\
 		smclog(LOG_INFO, "ipc: " fmt, ##args);			\
@@ -54,7 +58,7 @@
 
 #define WARN(fmt, args...) do {						\
 	if (conf)							\
-		smclog(LOG_WARNING, "%s line %d: " fmt, conf->file,	\
+		smclog(LOG_WARNING, "%s line %zu: " fmt, conf->file,	\
 		       conf->lineno, ##args);				\
 	else								\
 		smclog(LOG_WARNING, "ipc: " fmt, ##args);		\
@@ -345,7 +349,7 @@ static int conf_phyint(struct conf *conf, int enable, char *iif, int mrdisc, int
  */
 int conf_parse(struct conf *conf, int do_vifs)
 {
-	char *linebuf, *line;
+	char *buf, *line;
 	int rc = 0;
 	FILE *fp;
 
@@ -362,19 +366,7 @@ int conf_parse(struct conf *conf, int do_vifs)
 		return 1;
 	}
 
-	linebuf = malloc(MAX_LINE_LEN * sizeof(char));
-	if (!linebuf) {
-		int tmp = errno;
-
-		fclose(fp);
-		errno = tmp;
-		smclog(LOG_ERR, "Failed allocating memory to read .conf file: %s", strerror(errno));
-		exit(EX_OSERR);
-	}
-
-	conf->lineno = 0;
-next:
-	while ((line = fgets(linebuf, MAX_LINE_LEN, fp))) {
+	while ((buf = fparseln(fp, NULL, &conf->lineno, NULL, FPARSELN_UNESCCOMM))) {
 		int   mrdisc = 0, threshold = DEFAULT_THRESHOLD;
 		int   op = 0, num = 0, enable = do_vifs;
 		char *oif[MAX_MC_VIFS];
@@ -387,16 +379,10 @@ next:
 		glob_t gl;
 		size_t i;
 
-		/* Strip any line end character(s) */
-		chomp(line);
-		conf->lineno++;
+		line = buf;
 
 		DEBUG("%s", line);
 		while ((token = pop_token(&line))) {
-			/* Strip comments. */
-			if (match("#", token))
-				break;
-
 			if (!op) {
 				if (match("mgroup", token)) {
 					op = MGROUP;
@@ -456,7 +442,7 @@ next:
 				WARN("phyint %s does not exist (yet?) on this system", iif);
 				break;
 			}
-			continue;
+			goto next;
 		}
 
 		if (ttl) {
@@ -504,9 +490,10 @@ next:
 			WARN("Unknown token %d", op);
 			break;
 		}
+next:
+		free(buf);
 	}
 
-	free(linebuf);
 	fclose(fp);
 
 	if (rc) {

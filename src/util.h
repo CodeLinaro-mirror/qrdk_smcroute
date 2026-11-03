@@ -37,6 +37,15 @@ size_t strlcat(char *dst, const char *src, size_t dsize);
 FILE *tempfile(void);
 #endif
 
+#ifndef HAVE_FPARSELN
+#define FPARSELN_UNESCESC  0x01
+#define FPARSELN_UNESCCONT 0x02
+#define FPARSELN_UNESCCOMM 0x04
+#define FPARSELN_UNESCREST 0x08
+#define FPARSELN_UNESCALL  0x0f
+char *fparseln(FILE *fp, size_t *size, size_t *lineno, const char str[3], int flags);
+#endif
+
 int is_range(char *arg);
 
 inline static char *chomp(char *str)

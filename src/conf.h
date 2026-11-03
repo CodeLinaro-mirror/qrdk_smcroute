@@ -11,7 +11,7 @@
 
 struct conf {
 	const char   *file;
-	unsigned int  lineno;
+	size_t        lineno;
 };
 
 extern int conf_vrfy;
