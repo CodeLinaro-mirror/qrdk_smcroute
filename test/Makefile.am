@@ -22,7 +22,9 @@ TESTS             += json.sh
 TESTS             += lost.sh
 TESTS             += mem.sh
 TESTS             += mrcache.sh
+if USE_MRDISC
 TESTS             += mrdisc.sh
+endif
 TESTS             += multi.sh
 TESTS             += overlap.sh
 TESTS             += pending.sh
