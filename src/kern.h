@@ -40,6 +40,7 @@ int kern_set_filter  (int sd, struct iface *iface, inet_addr_t *group, int exclu
 ssize_t kern_recv    (int sd, void *buf, size_t len, struct kern_rx *rx);
 int     kern_send    (struct iface *iface, inet_addr_t *src, inet_addr_t *dst, const void *buf, size_t len);
 int     kern_proxy_queries(void);
+void    kern_router_alert(int on);
 
 int kern_mroute_init (int table_id, void (*cb)(int, void *), void *arg);
 int kern_mroute_exit (void);

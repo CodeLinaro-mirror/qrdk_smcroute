@@ -26,6 +26,7 @@ ip -br a
 print "Creating config ..."
 cat <<EOF > "/tmp/$NM/conf"
 global-query-interval 4
+router-alert off
 phyint $IF1 enable downstream proxy-querier
 phyint $IF2 enable downstream
 EOF
@@ -77,16 +78,18 @@ sleep 1
 print "Analyzing ..."
 tshark -r "/tmp/$NM/lan1.pcap" 2>/dev/null
 q1=$(count "/tmp/$NM/lan1.pcap" 'igmp.type == 0x11 && ip.src == 0.0.0.0')
+noopt=$(count "/tmp/$NM/lan1.pcap" "igmp.type == 0x11 && ip.src == 0.0.0.0 && ip.hdr_len == 20")
 q2=$(count "/tmp/$NM/lan2.pcap" 'igmp.type == 0x11 && ip.src == 0.0.0.0')
 m1=$(count "/tmp/$NM/lan1.pcap" 'icmpv6.type == 130 && ipv6.src == ::')
 m2=$(count "/tmp/$NM/lan2.pcap" 'icmpv6.type == 130 && ipv6.src != ::')
 after=$(count "/tmp/$NM/lan1-after.pcap" 'igmp.type == 0x11 && ip.src == 0.0.0.0')
 echo " => $q1 IGMP queries from 0.0.0.0 on $IF1 (proxy-querier), expected >= 2"
+echo " => $noopt of them without Router Alert, expected $q1"
 echo " => $q2 IGMP queries from 0.0.0.0 on $IF2 (no address), expected >= 2"
 echo " => $m1 MLD queries from :: on $IF1, expected >= 2"
 echo " => $m2 MLD queries from the link-local address on $IF2, expected >= 2"
 echo " => $after IGMP queries from 0.0.0.0 on $IF1 after standing down, expected 0"
 
 # shellcheck disable=SC2166 disable=SC2086
-[ $q1 -ge 2 -a $q2 -ge 2 -a $m1 -ge 2 -a $m2 -ge 2 -a $after -eq 0 ] && OK
+[ $q1 -ge 2 -a $q2 -ge 2 -a $m1 -ge 2 -a $m2 -ge 2 -a $after -eq 0 -a $noopt -eq $q1 ] && OK
 FAIL

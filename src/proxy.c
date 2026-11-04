@@ -37,7 +37,7 @@
 #include "util.h"
 
 /* smcroute.conf querier settings, timers in seconds, RFC 3376 §8 */
-enum { QUERY_INTERVAL, RESPONSE_INTERVAL, LAST_MEMBER_INTERVAL, ROBUSTNESS, ROUTER_TIMEOUT, TOPOLOGY_QUERY };
+enum { QUERY_INTERVAL, RESPONSE_INTERVAL, LAST_MEMBER_INTERVAL, ROBUSTNESS, ROUTER_TIMEOUT, TOPOLOGY_QUERY, ROUTER_ALERT };
 
 static struct {
 	const char *keyword;
@@ -49,6 +49,7 @@ static struct {
 	[ROBUSTNESS]           = { "robustness",                    2,   2, 2,   10 },
 	[ROUTER_TIMEOUT]       = { "router-timeout",                0,   0, 1, 1024 }, /* 0: derived */
 	[TOPOLOGY_QUERY]       = { "topology-query",                1,   1, 0,    1 },
+	[ROUTER_ALERT]         = { "router-alert",                  1,   1, 0,    1 },
 };
 
 /* Joined on downstream interfaces to receive what hosts send to routers */
@@ -133,6 +134,7 @@ void proxy_conf_reset(void)
 
 	for (i = 0; i < NELEMS(settings); i++)
 		settings[i].val = settings[i].def;
+	kern_router_alert(settings[ROUTER_ALERT].val);
 }
 
 /* Returns 0 if @keyword is not a setting, 1 when set, -1 when @arg is out of range */
@@ -157,6 +159,8 @@ int proxy_conf(const char *keyword, const char *arg)
 			return -1;
 
 		settings[i].val = val;
+		if (i == ROUTER_ALERT)
+			kern_router_alert(val);
 		return 1;
 	}
 

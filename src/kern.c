@@ -58,6 +58,7 @@ static int sd6 = -1;
 
 /* Router Alert for queries, RFC 3376 §4.1.3 and RFC 3810 §5 */
 static const uint8_t ra4[4] = { IPOPT_RA, 4, 0, 0 };
+static int router_alert = 1;
 #ifdef HAVE_IPV6_MULTICAST_HOST
 /* Hop-by-hop header with the Router Alert option, RFC 2711 */
 struct hbh_ra {
@@ -296,10 +297,18 @@ ssize_t kern_recv(int sd, void *buf, size_t len, struct kern_rx *rx)
 	return num;
 }
 
-/*
- * Send a query or report on @iface from the mrouted socket of @dst's family.
- * The sockets carry the Router Alert option and hop limit 1.
- */
+/* Router Alert on queries, RFC 3376 §4.1.3 and RFC 3810 §5 */
+void kern_router_alert(int on)
+{
+	router_alert = on;
+	if (sd4 != -1 && setsockopt(sd4, IPPROTO_IP, IP_OPTIONS, on ? ra4 : NULL, on ? sizeof(ra4) : 0))
+		smclog(LOG_WARNING, "Failed %s IPv4 Router Alert: %s", on ? "setting" : "clearing", strerror(errno));
+#ifdef HAVE_IPV6_MULTICAST_HOST
+	if (sd6 != -1 && setsockopt(sd6, IPPROTO_IPV6, IPV6_HOPOPTS, on ? (const void *)&ra6 : NULL, on ? sizeof(ra6) : 0))
+		smclog(LOG_WARNING, "Failed %s IPv6 Router Alert: %s", on ? "setting" : "clearing", strerror(errno));
+#endif
+}
+
 #if defined(__linux__) && defined(ENABLE_PROXY)
 /* Packet socket for queries from 0.0.0.0 and ::, send only */
 static int sdp = -1;
@@ -346,17 +355,18 @@ static int send_raw(struct iface *iface, inet_addr_t *dst, const void *buf, size
 		struct icmp6_hdr *icmp6;
 		const uint8_t *d;
 
-		hlen = sizeof(*ip6) + sizeof(ra6);
+		hlen = sizeof(*ip6) + (router_alert ? sizeof(ra6) : 0);
 		if (hlen + len > sizeof(pkt))
 			return errno = EMSGSIZE;
 
 		memset(ip6, 0, sizeof(*ip6));
 		ip6->ip6_flow = htonl(6 << 28);
-		ip6->ip6_plen = htons(sizeof(ra6) + len);
-		ip6->ip6_nxt  = IPPROTO_HOPOPTS;
+		ip6->ip6_plen = htons(hlen - sizeof(*ip6) + len);
+		ip6->ip6_nxt  = router_alert ? IPPROTO_HOPOPTS : IPPROTO_ICMPV6;
 		ip6->ip6_hlim = 1;
 		ip6->ip6_dst  = inet_addr6_get(dst)->sin6_addr;
-		memcpy(ip6 + 1, &ra6, sizeof(ra6));
+		if (router_alert)
+			memcpy(ip6 + 1, &ra6, sizeof(ra6));
 
 		icmp6 = memcpy(pkt + hlen, buf, len);
 		icmp6->icmp6_cksum = 0;
@@ -372,7 +382,7 @@ static int send_raw(struct iface *iface, inet_addr_t *dst, const void *buf, size
 		struct ip *ip = (struct ip *)pkt;
 		uint32_t d;
 
-		hlen = sizeof(*ip) + sizeof(ra4);
+		hlen = sizeof(*ip) + (router_alert ? sizeof(ra4) : 0);
 		if (hlen + len > sizeof(pkt))
 			return errno = EMSGSIZE;
 
@@ -384,7 +394,8 @@ static int send_raw(struct iface *iface, inet_addr_t *dst, const void *buf, size
 		ip->ip_ttl = 1;
 		ip->ip_p   = IPPROTO_IGMP;
 		ip->ip_dst = *inet_addr_get(dst);
-		memcpy(ip + 1, ra4, sizeof(ra4));
+		if (router_alert)
+			memcpy(ip + 1, ra4, sizeof(ra4));
 		ip->ip_sum = inet_cksum(ip, hlen);
 		memcpy(pkt + hlen, buf, len);
 
@@ -418,8 +429,8 @@ static int send_raw(struct iface *iface, inet_addr_t *dst, const void *buf, size
 
 /*
  * Send an IGMP or MLD message on @iface from @src to @dst.  The raw
- * sockets carry the Router Alert option and hop limit 1 and use the
- * interface address, an unspecified @src goes out as a proxy query.
+ * sockets have hop limit 1 and use the interface address, an
+ * unspecified @src goes out as a proxy query.
  */
 int kern_send(struct iface *iface, inet_addr_t *src, inet_addr_t *dst, const void *buf, size_t len)
 {
@@ -503,9 +514,7 @@ int kern_mroute_init(int table_id, void (*cb)(int, void *), void *arg)
 	if (setsockopt(sd4, IPPROTO_IP, MRT_PIM, &val, sizeof(val)))
 		smclog(LOG_ERR, "Failed enabling PIM IGMPMSG_WRONGVIF, ignoring: %s", strerror(errno));
 
-	/* For queries, RFC 3376 §4.1.3 */
-	if (setsockopt(sd4, IPPROTO_IP, IP_OPTIONS, ra4, sizeof(ra4)))
-		smclog(LOG_WARNING, "Failed setting Router Alert option: %s", strerror(errno));
+	kern_router_alert(router_alert);
 	if (setsockopt(sd4, IPPROTO_IP, IP_MULTICAST_TTL, &val, sizeof(val)))
 		smclog(LOG_WARNING, "Failed setting multicast TTL: %s", strerror(errno));
 
@@ -746,9 +755,7 @@ int kern_mroute6_init(int table_id, void (*cb)(int, void *), void *arg)
 	if (setsockopt(sd6, IPPROTO_IPV6, MRT6_INIT, &val, sizeof(val)))
 		goto error;
 
-	/* For queries, RFC 3810 §5, the kernel sets the next header */
-	if (setsockopt(sd6, IPPROTO_IPV6, IPV6_HOPOPTS, &ra6, sizeof(ra6)))
-		smclog(LOG_WARNING, "Failed setting Router Alert option: %s", strerror(errno));
+	kern_router_alert(router_alert);
 	if (setsockopt(sd6, IPPROTO_IPV6, IPV6_MULTICAST_HOPS, &val, sizeof(val)))
 		smclog(LOG_WARNING, "Failed setting multicast hop limit: %s", strerror(errno));
 

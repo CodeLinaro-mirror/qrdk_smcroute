@@ -22,6 +22,7 @@ print "Creating config ..."
 cat <<EOF > "/tmp/$NM/conf"
 global-response-interval 2
 robustness 3
+router-alert off
 phyint $DIF enable downstream query-interval 4
 EOF
 cat "/tmp/$NM/conf"
@@ -46,10 +47,14 @@ tshark -r "/tmp/$NM/ctrl.pcap" 2>/dev/null | tee "/tmp/$NM/ctrl"
 general=$(grep -c "Membership Query, general" "/tmp/$NM/ctrl")
 mld=$(grep -c "Multicast Listener Query" "/tmp/$NM/ctrl")
 resp=$(tshark -r "/tmp/$NM/ctrl.pcap" -Y 'igmp.type == 0x11' -T fields -e igmp.max_resp 2>/dev/null | sort -u | tr '\n' ' ')
+noopt=$(tshark -r "/tmp/$NM/ctrl.pcap" -Y "igmp.type == 0x11 && ip.hdr_len == 20" 2>/dev/null | grep -c .)
+nohbh=$(tshark -r "/tmp/$NM/ctrl.pcap" -Y "icmpv6.type == 130 && ipv6.nxt == 58" 2>/dev/null | grep -c .)
 echo " => $general IGMP general queries, expected >= 5"
 echo " => $mld MLD general queries, expected >= 5"
 echo " => IGMP max response time(s), in 1/10 sec: $resp, expected 20"
+echo " => $noopt IGMP queries without Router Alert, expected $general"
+echo " => $nohbh MLD queries without Router Alert, expected $mld"
 
 # shellcheck disable=SC2166 disable=SC2086
-[ $general -ge 5 -a $mld -ge 5 -a "$resp" = "20 " ] && OK
+[ $general -ge 5 -a $mld -ge 5 -a "$resp" = "20 " -a $noopt -eq $general -a $nohbh -eq $mld ] && OK
 FAIL

@@ -349,6 +349,7 @@ static int conf_phyint(struct conf *conf, int enable, char *iif, const struct ph
  *    robustness <2-10>
  *    router-timeout <1-1024>
  *    topology-query <on|off>
+ *    router-alert <on|off>
  *    phyint IFNAME <enable|disable> [mrdisc] [upstream|downstream] [proxy-querier] [ttl-threshold <1-255>] [query-interval <1-1024>]
  *    mgroup   from IFNAME [source ADDRESS] group MCGROUP
  *    mroute   from IFNAME source ADDRESS   group MCGROUP to IFNAME [IFNAME ...]
