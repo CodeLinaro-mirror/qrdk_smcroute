@@ -6,6 +6,35 @@ All notable changes to the project are documented in this file.
 [UNRELEASED][]
 -----------------------
 
+### Changes
+
+- A line in `smcroute.conf` ending in `\` continues on the next line
+- `router-alert off` sends queries without the IP Router Alert option,
+  for hosts that drop packets with IP options
+- Add IGMP/MLD proxying, RFC 4605: `phyint IFNAME upstream|downstream`
+  in `smcroute.conf`.  `smcrouted` acts as querier on the downstream
+  interfaces, tracks memberships per group and, for IGMPv3/MLDv2, per
+  source, and subscribes to them on the upstream interface.  Replaces
+  igmpproxy and mcproxy in most setups, with SSM through the proxy, and
+  can be combined with static routes
+- Add `smcroutectl show members`, also as JSON, listing the proxy
+  interfaces, elected queriers and learned memberships
+- Querier timers can be set in `smcroute.conf`: `global-query-interval`,
+  `global-response-interval`, `global-last-member-interval`,
+  `robustness` and `router-timeout`, with `query-interval` per `phyint`
+- Proxy queries, RFC 4541: a `downstream` interface without an address
+  queries from 0.0.0.0 or ::, and `phyint IFNAME proxy-querier` forces
+  it.  Such queries never win an election and stop when a real querier
+  is heard.  Linux only
+- Topology query, RFC 4541: a general query when a port of a bridge
+  starts forwarding, on the `downstream` that is the bridge or a VLAN
+  interface on it.  `topology-query off` disables it.  Linux only
+- Add `smcroutectl show querier`, the IGMP and MLD querier state of
+  each proxy downstream interface, also as JSON
+- The `-e` script is also called with `join` and `leave` for proxy
+  memberships, with `$iface` and `$group` set
+- New configure option `--disable-proxy`
+
 ### Fixes
 
 - Fix #225: stack buffer overflow, and possible daemon crash, when

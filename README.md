@@ -6,6 +6,7 @@ Table of Contents
 -----------------
 * [About](#about)
 * [Features](#features)
+* [IGMP/MLD Proxy and Querier](#igmpmld-proxy-and-querier)
 * [Usage](#usage)
   * [Caveat](#caveat)
   * [Actions Scripts](#action-scripts)
@@ -32,10 +33,21 @@ SMCRoute is a static multicast routing daemon providing fine grained
 control over the multicast forwarding cache (MFC) in the UNIX kernel.
 Both IPv4 and IPv6 are fully supported.
 
-SMCRoute can be used as an alternative to dynamic multicast routers like
-[mrouted][], [pimd][], or [pim6sd][] in setups where static multicast
-routes should be maintained and/or no proper IGMP or MLD signaling
-exists.
+Routes are set up in `smcroute.conf` or with `smcroutectl`, either per
+source and group, `(S,G)`, or as `(*,G)` templates that the kernel fills
+in when a matching stream appears.  Optionally, routes can also follow
+the group memberships hosts announce: with IGMP/MLD proxying,
+[RFC4605][], SMCRoute is the querier towards the hosts on its downstream
+interfaces, forwards the groups they join, and subscribes to them on its
+upstream interface.  Static routes and proxying can be combined.
+
+This makes SMCRoute an alternative to dynamic multicast routers like
+[mrouted][], [pimd][], or [pim6sd][] in setups that need no routing
+protocol: when the flows are known in advance, when there is no IGMP or
+MLD signaling to go on, or in a tree topology with a single path towards
+the sources, where the memberships of the hosts are enough to decide
+what to forward.  Networks with several paths between sources and
+receivers still need a routing protocol.
 
 Multicast routes exist in the UNIX kernel as long as a multicast routing
 daemon runs.  On Linux, SMCRoute can run next to another multicast
@@ -59,6 +71,8 @@ Linux.  E.g., FreeBSD does not have SSM group join support.
   - Support for seamless reloading of the configuration on `SIGHUP`
   - Source-less on-demand routing, a.k.a. wildcard `(*,G)` based static
     routing, including support for `(*,G/LEN)` and `(S/LEN,G/LEN)`
+  - IGMP/MLD proxying, [RFC4605][], as a replacement for igmpproxy and
+    mcproxy, including source-specific multicast (SSM) through the proxy
   - Optional built-in [mrdisc][] support for IPv4, [RFC4286][]
   - Support for multiple routing tables on Linux
   - Client to add/remove routes, join/leave groups, and built-in support
@@ -69,6 +83,42 @@ Linux.  E.g., FreeBSD does not have SSM group join support.
 >            of `smcrouted`, but any changes made (routes/groups) are
 >            lost when the configuration is reloaded.  This is by design.
 
+
+IGMP/MLD Proxy and Querier
+--------------------------
+
+Proxying is optional.  It lets routes follow the IGMP and MLD
+memberships of the hosts, [RFC4605][], covering what [igmpproxy][] and
+[mcproxy][] do, in the same daemon as the static routes:
+
+    phyint wan0 enable upstream
+    phyint lan0 enable downstream
+
+`smcrouted` is the querier towards the hosts on each `downstream`
+interface and a host towards the router on the `upstream` interface.
+Traffic from the upstream is forwarded to the downstreams with members
+for the group, traffic from a downstream to the upstream and the other
+downstreams with members.  IGMPv3 and MLDv2 INCLUDE mode memberships
+are tracked per source, so SSM works through the proxy; the source
+lists of EXCLUDE mode reports are ignored, as in [RFC5790][].  One
+upstream per `smcrouted` is supported, and static `mroute` rules can be
+mixed in freely.  The querier timers follow the RFC defaults and can be
+changed in `smcroute.conf`: `global-query-interval`, `robustness`, and
+`query-interval` per `phyint`, see the manual.  A
+downstream without an address queries from 0.0.0.0 and ::, like a
+snooping switch, and `proxy-querier` forces that for a bridge that
+should only stand in until a real querier appears.  When a port of a
+bridge starts forwarding, the querier on the bridge sends a general
+query right away, so hosts behind the port are back in the bridge's
+multicast database without waiting for the next interval.
+
+    smcroutectl show members
+    smcroutectl -d show members
+    smcroutectl show querier
+
+lists the memberships, with `-d` the proxy interfaces and their
+elected queriers, and the querier state per interface and protocol.
+JSON output with `-j`.
 
 Usage
 -----
@@ -436,6 +486,10 @@ author.
 [mrouted]:         https://github.com/troglobit/mrouted
 [pimd]:            https://github.com/troglobit/pimd
 [pim6sd]:          https://github.com/troglobit/pim6sd
+[igmpproxy]:       https://github.com/pali/igmpproxy
+[mcproxy]:         https://github.com/mcproxy/mcproxy
+[RFC4605]:         https://www.rfc-editor.org/rfc/rfc4605
+[RFC5790]:         https://www.rfc-editor.org/rfc/rfc5790
 [mrdisc]:          https://github.com/troglobit/mrdisc
 [RFC4286]:         https://tools.ietf.org/html/rfc4286
 [Home]:            https://github.com/troglobit/smcroute

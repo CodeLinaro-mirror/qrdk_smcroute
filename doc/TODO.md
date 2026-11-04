@@ -118,34 +118,40 @@ Filtering multiple sources:
 This is sometimes also referred to as Administrative Scoping (RFC2365).
 
 
-Basic support for IGMP/MLD proxying
------------------------------------
+IGMP/MLD proxy, remaining work
+------------------------------
 
-In some setups a semi-dynamic behavior is required, but the only
-signaling available is IGMP/MLD.  There exist tools like [igmpproxy][]
-and [mcproxy][] for this purpose, which do a great job, but why should
-you need to go elsewhere for your basic multicast routing needs?
+The proxy, `phyint IFNAME upstream|downstream`, covers what igmpproxy
+and mcproxy do for most setups.  Left for later:
 
-The idea itself is simple, listen for IGMP/MLD join/leave messages on
-enabled interfaces and add/remove routes dynamically from an `upstream`
-marked interface.  The v2.6.0 pending-routes list (`src/pending.c`) and
-the netlink/route-socket event listener (`src/ifevent.h`) provide most
-of the runtime substrate: an incoming Membership Report would call
-something like `pending_add_mroute()` plus an immediate drain, with the
-upstream/downstream wiring driven by the `phyint` flags below.
-
-Possibly an `igmp` flag may be needed as well, for downstream interfaces
-we should proxy for.  Resulting `smcroute.conf` may then look like this:
-
-    phyint eth0 upstream
-    phyint eth1 igmp
-
-**Note:** the IGMP/MLD signaling may also need to be "proxied" to the
-  `upstream` interface, although this could be an optional second step
-  enabled by also setting the `igmp` flag on that `upstream` interface.
-
-For more information, see the above mentioned tools and [RFC4605][],
-which details exactly this use-case.
+  - EXCLUDE mode source lists are ignored, RFC 5790 lightweight
+    semantics.  Full RFC 3376 §6.4 state (EXCLUDE with sources, and
+    group-and-source specific queries) would need a per-group filter
+    on the upstream that the kernel can express with setsourcefilter()
+    already, so the merge in `upstream_sync()` is the place to start
+  - One upstream interface per daemon.  mcproxy allows several, each
+    with a set of groups; a `proxy` directive mapping group ranges to
+    upstreams would be the natural syntax, with `proxy_oifs()` picking
+    the upstream per entry instead of the global `upstream`
+  - Allow/deny lists per downstream interface, to keep e.g. SSDP from
+    being forwarded upstream.  Filter at report ingress, before the
+    membership is created, so forwarding and the upstream subscription
+    agree
+  - The IGMP/MLD version to start querying with is always the latest,
+    with fallback per link and per group when older hosts appear.  A
+    per-interface `phyint` option, `igmpv2`/`mldv1`, would let hosts
+    that choke on v3 queries be served from the start
+  - A non-querier keeps its own timers.  RFC 3376 §6.2.1 has it adopt
+    the elected querier's QQI and QRV from the QQIC and QRV fields of
+    its queries, `proxy_query()` gets the whole query so the fields are
+    there to parse
+  - mrdisc, RFC 4286, is IPv4 only; the MLD side of the proxy has the
+    ff02::2 socket for it already
+  - Only tested on Linux.  Proxy queries from 0.0.0.0/:: need the Linux
+    packet socket, the topology query needs the netlink listener, both
+    are left out on other systems.  The receive path uses IP_PKTINFO
+    with an IP_RECVIF fallback written but untested, and the sticky
+    IPV6_HOPOPTS Router Alert needs CAP_NET_RAW at init on Linux
 
 
 [igmpproxy]: https://github.com/pali/igmpproxy

@@ -26,14 +26,37 @@ is a static multicast routing daemon providing fine grained control over
 the multicast forwarding cache (MFC) in the UNIX kernel.  Both IPv4 and
 IPv6 are fully supported.
 .Pp
+Routes are set up in
+.Xr smcroute.conf 5
+or with
+.Xr smcroutectl 8 ,
+either per source and group, (S,G), or as (*,G) templates that the
+kernel fills in when a matching stream appears.  Optionally, routes can
+also follow the group memberships hosts announce: with IGMP/MLD
+proxying, RFC 4605,
 .Nm
-can be used as an alternative to dynamic multicast daemons like
+is the querier towards the hosts on its downstream interfaces, forwards
+the groups they join, and subscribes to them on its upstream interface.
+Static routes and proxying can be combined, see the
+.Cm upstream
+and
+.Cm downstream
+flags in
+.Xr smcroute.conf 5 .
+.Pp
+This makes
+.Nm
+an alternative to dynamic multicast daemons like
 .Xr mrouted 8 ,
 .Xr pimd 8
 or
 .Xr pim6sd 8
-in situations where static multicast routes should be maintained and/or
-no proper IGMP or MLD signaling exists.
+in setups that need no routing protocol: when the flows are known in
+advance, when there is no IGMP or MLD signaling to go on, or in a tree
+topology with a single path towards the sources, where the memberships
+of the hosts are enough to decide what to forward.  Networks with
+several paths between sources and receivers still need a routing
+protocol.
 .Pp
 Multicast routes exist in the UNIX kernel only as long as a multicast
 routing daemon is running.  On Linux,
@@ -223,6 +246,18 @@ also sets two environment variables:
 .Nm source ,
 and
 .Nm group .
+With IGMP/MLD proxying, see
+.Xr smcroute.conf 5 ,
+the script is also called with
+.Ar join
+or
+.Ar leave
+when a membership on a downstream interface appears or times out, with
+the environment variables
+.Nm iface
+and
+.Nm group
+set.
 Beware that these environment variables are unconditionally overwritten by
 .Nm
 and can thus not be used to pass information to the script from outside of
@@ -334,12 +369,11 @@ The output interfaces are not needed when removing routes using the
 command.  The first three parameters are sufficient to identify the
 source of the multicast route.
 .Pp
-The intended purpose of
-.Nm
-is to aid in situations where dynamic multicast routing does not work
-properly.  However, a dynamic multicast routing protocol is in nearly
-all cases the preferred solution.  The reason for this is their ability
-to translate Layer-3 signaling to Layer-2 and vice versa (IGMP or MLD).
+Static routes suit flows that are known in advance.  For routes that
+follow the group memberships of hosts, use IGMP/MLD proxying, see
+.Xr smcroute.conf 5 .
+Where several paths exist between sources and receivers, a dynamic
+multicast routing protocol is the better choice.
 .Pp
 .Sy Note:
 the optional source address multicast routes are not installed in the

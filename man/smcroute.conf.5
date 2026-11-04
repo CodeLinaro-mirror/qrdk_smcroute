@@ -42,17 +42,80 @@ logs the success of parsing each line and setting up a route.  There is
 also a basic syntax validator built-in, see
 .Xr smcrouted 8
 for more information.
+.Pp
+Static routes and group memberships are set up with
+.Cm mroute
+and
+.Cm mgroup .
+Optionally, routes can also follow the group memberships hosts
+announce: the
+.Cm upstream
+and
+.Cm downstream
+flags on
+.Cm phyint
+enable IGMP/MLD proxying, RFC 4605, where
+.Nm smcrouted
+is the querier towards the hosts and forwards what they join.  The
+querier timers are global settings.  Static routes and proxying can be
+combined.
 .Sh SYNTAX
 This section details the syntax of each of the available configuration
 file directives.
 .Pp
 Comments start with
 .Dq #\&
-and run to the end of line.  See the
+and run to the end of line.  A line ending in a backslash continues on
+the next line.  See the
 .Sx EXAMPLE
 below.
 .Bl -tag -offset indent
-.It Cm phyint Ar IFNAME Oo Cm enable | Cm disable Oc Oo Cm mrdisc Oc Oo Cm ttl-threshold Ar TTL Oc
+.It Cm global-query-interval Ar SEC
+Seconds between the general queries sent as querier on a
+.Cm downstream
+interface, 1 to 1024, default 125.  Values below 10 are not
+recommended.  Can be overridden per interface with the
+.Cm phyint
+option
+.Cm query-interval .
+.It Cm global-response-interval Ar SEC
+Maximum response time hosts get for a general query, 1 to 1024,
+default 10.  A longer time spreads the reports out.  It is capped at
+the query interval of the interface.
+.It Cm global-last-member-interval Ar SEC
+Seconds between the group specific queries sent after a leave, 1 to
+1024, default 1.  The number of such queries is the
+.Cm robustness .
+.It Cm robustness Ar NUM
+Tolerance to lost packets, 2 to 10, default 2.  Also the number of
+queries in the startup burst.
+.It Cm router-timeout Ar SEC
+Time to wait for a silent querier before taking over, the other
+querier present interval, 1 to 1024.  When unset it is calculated per
+interface, RFC 3376 \(sc8.5, from the interface's query interval:
+.Bd -literal -offset indent
+robustness * query-interval + response-interval / 2
+.Ed
+.Pp
+Set it only to interoperate with devices that do not follow the RFC.
+.It Cm router-alert on | off
+IP option Router Alert on the queries sent, RFC 3376 \(sc4.1.3 and
+RFC 3810 \(sc5, on by default.  Turn it off for hosts whose IP stack
+hard-codes the IP header length and drops packets with options, seen
+in industrial devices.
+.It Cm topology-query on | off
+General query when a port of a bridge starts forwarding, on by
+default.  Link up, STP settling and a port added to the bridge all
+count.  Hosts behind the port are back in the bridge's multicast
+database within the response interval instead of at the next periodic
+query, RFC 4541 \(sc2.1.1.  Sent only while
+.Nm smcrouted
+is the querier, at most once a second per interface, followed by the
+startup burst.  Applies to a
+.Cm downstream
+that is the bridge itself or a VLAN interface on top of it.  Linux
+only.
+.It Cm phyint Ar IFNAME Oo Cm enable | Cm disable Oc Oo Cm mrdisc Oc Oo Cm upstream | Cm downstream Oc Oo Cm proxy-querier Oc Oo Cm ttl-threshold Ar TTL Oc Oo Cm query-interval Ar SEC Oc
 .Nm smcrouted
 maps interfaces to virtual interfaces (VIFs), which the multicast
 routing stack actually employs.  VIFs are allocated on demand, the
@@ -80,6 +143,42 @@ switch (and router) manufacturers and may be used instead of having
 .Cm mgroup
 statements for all possible multicast groups you may want to forward.
 .Pp
+.Cm upstream
+and
+.Cm downstream
+set up IGMP/MLD proxying, RFC 4605.
+.Nm smcrouted
+acts as querier towards the hosts on each
+.Cm downstream
+interface, and as a host towards the router on the
+.Cm upstream
+interface, subscribing to what the downstream hosts have joined.
+Multicast from the upstream is forwarded to every downstream with a
+member for the group, multicast from a downstream to the upstream and
+to the other downstreams with members.  Memberships are tracked per
+group and, for IGMPv3 and MLDv2 INCLUDE mode reports, per source, so
+source-specific multicast (SSM) works through the proxy.  Source lists
+of EXCLUDE mode reports are ignored, as in RFC 5790.  One upstream
+interface is supported.  Static
+.Cm mroute
+and
+.Cm mgroup
+directives can be combined freely with proxying, and
+.Xr smcroutectl 8
+.Cm show members
+lists the current state.
+.Pp
+A
+.Cm downstream
+interface without an address of the family sends its queries from
+the unspecified address, 0.0.0.0 or ::, RFC 4541 \(sc2.1.1.1.  Such
+proxy queries never win a querier election and stop as soon as a
+querier with an address is heard.  Snooping switches accept them,
+which is what they are for.  Hosts ignore MLD queries from ::.
+.Cm proxy-querier
+forces this even when the interface has an address, for a bridge
+that should only stand in until a real querier appears.  Linux only.
+.Pp
 .Cm ttl-threshold
 is a very useful setting to help implement "TTL scoping".  I.e., the
 minimum TTL level a multicast stream must exceed for the kernel to
@@ -88,6 +187,11 @@ higher is needed for a frame to be forwarded to the routing stack,
 otherwise it is considered link-local.  See
 .Xr smcrouted 8
 for more information on multicast scoping.
+.Pp
+.Cm query-interval
+overrides
+.Cm global-query-interval
+on this interface, 1 to 1024 seconds.
 .Pp
 .Sy Note:
 all
@@ -207,7 +311,14 @@ etc.  Wildcards are available for inbound interfaces.
 # smcroute.conf example
 #
 # Syntax:
-#   phyint IFNAME <enable|disable> [mrdisc] [ttl-threshold <1-255>]
+#   global-query-interval <1-1024>
+#   global-response-interval <1-1024>
+#   global-last-member-interval <1-1024>
+#   robustness <2-10>
+#   router-timeout <1-1024>
+#   topology-query <on|off>
+#   router-alert <on|off>
+#   phyint IFNAME <enable|disable> [mrdisc] [upstream|downstream] [proxy-querier] [ttl-threshold <1-255>] [query-interval <1-1024>]
 #   mgroup from IIF [source ADDR[/LEN]] group GROUP[/LEN]
 #   mroute from IIF [source ADDR[/LEN]] group GROUP[/LEN] to OIF [OIF ...]
 #   include /path/to/*.conf
@@ -243,6 +354,11 @@ mroute from eth0 group 225.3.2.1 to eth1 eth2
 # to specify a range of such rules.
 mgroup from eth0 group 225.0.0.0/24
 mroute from eth0 group 225.0.0.0/24 to eth1 eth2
+
+# IGMP/MLD proxy, RFC 4605.  Hosts on lan0 join groups, which are
+# then subscribed to on wan0 and forwarded to lan0.
+phyint wan0 enable upstream
+phyint lan0 enable downstream
 
 # Include any snippet in /etc/smcroute.d/, but please remember that
 # all phyint statements must be read first.

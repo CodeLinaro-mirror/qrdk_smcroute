@@ -219,9 +219,21 @@ Note, any routes or groups added or removed with
 will be lost.  Only the configuration set in the file
 .Pa smcroute.conf
 is activated.
-.It Nm show [groups|interfaces|pending|routes]
-Show joined multicast groups, configured interfaces, pending routes
-and groups, or multicast routes — defaults to routes.
+.It Nm show [groups|interfaces|members|pending|querier|routes]
+Show joined multicast groups, configured interfaces, IGMP/MLD proxy
+memberships, pending routes and groups, querier status, or multicast
+routes — defaults to routes.
+.Cm members
+lists the memberships learned on proxy downstream interfaces, with
+mode, remaining time and sources, and with
+.Fl d
+also the proxy interfaces and the elected IGMP and MLD querier on each.
+.Cm querier
+lists the IGMP and MLD querier of each proxy downstream interface:
+state, up when querying from the interface address and proxy when
+from 0.0.0.0 or ::, the querier address, the query interval, the
+time left until a silent querier is replaced, and the protocol
+version in use.
 .Cm pending
 lists
 .Cm mroute
