@@ -30,6 +30,7 @@
 #include "log.h"
 #include "msg.h"
 #include "pending.h"
+#include "proxy.h"
 #include "iface.h"
 #include "util.h"
 #include "mroute.h"
@@ -142,8 +143,14 @@ static int do_show(struct ipc_msg *msg, int sd, enum show_mode mode)
 		case 'i':
 			return iface_show(sd, mode);
 
+		case 'm':
+			return proxy_show(sd, mode);
+
 		case 'p':
 			return pending_show(sd, mode);
+
+		case 'q':
+			return proxy_show_querier(sd, mode);
 
 		default:
 			break;

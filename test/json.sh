@@ -40,8 +40,8 @@ ip addr add 20.0.0.1/24 dev a2
 
 print "Creating config ..."
 cat <<EOF > "/tmp/$NM/conf"
-phyint a1 enable
-phyint a2 enable
+phyint a1 enable upstream
+phyint a2 enable downstream
 
 mgroup from a1 group 225.1.1.1
 mroute from a1 group 225.3.3.3 to a2
@@ -69,6 +69,18 @@ check_json "show routes" \
 	"any(r['group'] == '225.3.3.3' and r['iif'] == 'a1' and r['oifs'] == ['a2'] for r in d['routes']['asm']) \
 	 and any(r['group'] == '225.4.4.4' and r['source'] == '10.0.0.5' for r in d['routes']['ssm'])"
 
+if [ -n "$PROXY" ]; then
+	check_json "show members" \
+	"$($CTL -j show members)" \
+	"any(i['name'] == 'a2' and i['role'] == 'downstream' and i['igmp_querier'] == '20.0.0.1' for i in d['members']['interfaces']) \
+	 and d['members']['groups'] == []"
+	check_json "show querier" \
+	"$($CTL -j show querier)" \
+	"any(q['interface'] == 'a2' and q['family'] == 'ipv4' and q['state'] == 'up' and q['querier'] == '20.0.0.1' \
+	     and q['interval'] == 125 and q['version'] == 3 and q['timeout'] is None for q in d['querier'])"
+else
+	print "Built without proxy support, skipping show members and show querier"
+fi
 check_json "show pending" \
 	"$($CTL -j show pending)" \
 	"any(p['iif'] == 'wg0' and p['group'] == '239.5.5.5' and p['oifs'] == ['a2'] for p in d['pending'])"

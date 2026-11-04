@@ -69,7 +69,9 @@ s.sendto(pkt, ("224.0.0.1", 0))
 '
 sleep 1
 
-print "Verifying $IF1 stands down for the host ..."
+print "Verifying the host is now querier on $IF1 ..."
+../src/smcroutectl -u "/tmp/$NM/sock" -d show members | tee "/tmp/$NM/members"
+../src/smcroutectl -u "/tmp/$NM/sock" show querier | tee "/tmp/$NM/querier"
 C1=$(capture "$LAN1" "/tmp/$NM/lan1-after.pcap")
 sleep 5
 kill $C1
@@ -83,13 +85,17 @@ q2=$(count "/tmp/$NM/lan2.pcap" 'igmp.type == 0x11 && ip.src == 0.0.0.0')
 m1=$(count "/tmp/$NM/lan1.pcap" 'icmpv6.type == 130 && ipv6.src == ::')
 m2=$(count "/tmp/$NM/lan2.pcap" 'icmpv6.type == 130 && ipv6.src != ::')
 after=$(count "/tmp/$NM/lan1-after.pcap" 'igmp.type == 0x11 && ip.src == 0.0.0.0')
+host=$(grep -c "^$IF1 .*downstream *20.0.0.10" "/tmp/$NM/members")
+querier=$(grep -c "^$IF1 *IGMP *proxy *20.0.0.10 " "/tmp/$NM/querier")
 echo " => $q1 IGMP queries from 0.0.0.0 on $IF1 (proxy-querier), expected >= 2"
 echo " => $noopt of them without Router Alert, expected $q1"
 echo " => $q2 IGMP queries from 0.0.0.0 on $IF2 (no address), expected >= 2"
 echo " => $m1 MLD queries from :: on $IF1, expected >= 2"
 echo " => $m2 MLD queries from the link-local address on $IF2, expected >= 2"
+echo " => $host lines showing the host as IGMP querier on $IF1, expected 1"
+echo " => $querier lines of show querier with the host as IGMP querier on $IF1, expected 1"
 echo " => $after IGMP queries from 0.0.0.0 on $IF1 after standing down, expected 0"
 
 # shellcheck disable=SC2166 disable=SC2086
-[ $q1 -ge 2 -a $q2 -ge 2 -a $m1 -ge 2 -a $m2 -ge 2 -a $after -eq 0 -a $noopt -eq $q1 ] && OK
+[ $q1 -ge 2 -a $q2 -ge 2 -a $m1 -ge 2 -a $m2 -ge 2 -a $host -eq 1 -a $querier -eq 1 -a $after -eq 0 -a $noopt -eq $q1 ] && OK
 FAIL

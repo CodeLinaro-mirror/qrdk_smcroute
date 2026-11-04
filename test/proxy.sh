@@ -47,6 +47,10 @@ nsenter --net="$DOWN" -- mcjoin -o -i eth0 -W 60 225.1.2.5 >/dev/null 2>&1 &
 echo $! >> "/tmp/$NM/PIDs"
 sleep 2
 
+echo "-----------------------------------------------------------------------------------"
+../src/smcroutectl -pdu "/tmp/$NM/sock" show members | tee "/tmp/$NM/members"
+echo "-----------------------------------------------------------------------------------"
+
 print "Starting collector ..."
 nsenter --net="$DOWN" -- tshark -c 12 -lni eth0 -w "/tmp/$NM/pcap" \
 	'dst 225.1.2.3 or dst 225.1.2.4 or dst 225.1.2.5 or dst ff2e::42' &
@@ -66,11 +70,13 @@ lines1=$(grep ICMP "/tmp/$NM/result" | grep -c 225.1.2.3)
 lines2=$(grep ICMP "/tmp/$NM/result" | grep -c 225.1.2.4)
 lines3=$(grep ICMP "/tmp/$NM/result" | grep -c 225.1.2.5)
 lines4=$(grep ICMP "/tmp/$NM/result" | grep -c ff2e::42 )
+members=$(grep -c "^225.1.2.3 .*exclude\|^225.1.2.5 .*exclude\|^ff2e::42 .*exclude" "/tmp/$NM/members")
 echo " => $lines1 for 225.1.2.3 (IGMPv3), expected >= 2"
 echo " => $lines2 for 225.1.2.4 (no member), expected 0"
 echo " => $lines3 for 225.1.2.5 (IGMPv2), expected >= 2"
 echo " => $lines4 for ff2e::42 (MLDv2), expected >= 2"
+echo " => $members memberships listed, expected 3"
 
 # shellcheck disable=SC2166 disable=SC2086
-[ $lines1 -ge 2 -a $lines2 -eq 0 -a $lines3 -ge 2 -a $lines4 -ge 2 ] && OK
+[ $lines1 -ge 2 -a $lines2 -eq 0 -a $lines3 -ge 2 -a $lines4 -ge 2 -a $members -eq 3 ] && OK
 FAIL

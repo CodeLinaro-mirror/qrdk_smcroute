@@ -5,6 +5,10 @@ EXTRA_DIST        += poison.sh proxy.sh proxyq.sh querier.sh reload.sh reload6.s
 CLEANFILES         = *~ *.trs *.log
 TEST_EXTENSIONS    = .sh
 TESTS_ENVIRONMENT  = unshare -mrun --map-auto
+if USE_PROXY
+PROXY              = 1
+endif
+AM_TESTS_ENVIRONMENT = PROXY=$(PROXY); export PROXY;
 
 TESTS              = expire.sh
 TESTS             += adv.sh

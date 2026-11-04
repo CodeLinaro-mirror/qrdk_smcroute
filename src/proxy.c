@@ -27,12 +27,14 @@
 
 #include "iface.h"
 #include "igmp.h"
+#include "ipc.h"
 #include "kern.h"
 #include "log.h"
 #include "mcgroup.h"
 #include "mld.h"
 #include "mroute.h"
 #include "proxy.h"
+#include "script.h"
 #include "timer.h"
 #include "util.h"
 
@@ -296,6 +298,11 @@ static int querier_addr(struct proxy_iface *pif, int family, inet_addr_t *addr)
 	return kern_proxy_queries() ? 0 : -1;
 }
 
+static const char *role_str(int role)
+{
+	return role == PROXY_UPSTREAM ? "upstream" : "downstream";
+}
+
 static struct proxy_iface *pif_find(struct iface *iface)
 {
 	struct proxy_iface *pif;
@@ -355,6 +362,7 @@ static struct member *member_get(struct proxy_iface *pif, inet_addr_t *group, in
 	TAILQ_INIT(&m->sources);
 	TAILQ_INSERT_TAIL(&pif->members, m, link);
 	*changed = 1;
+	script_member("join", pif->iface->ifname, group);
 
 	return m;
 }
@@ -821,6 +829,7 @@ static void sweep(void *arg)
 
 				smclog(LOG_INFO, "Membership for %s on %s timed out",
 				       inet_addr2str(&group, g, sizeof(g)), pif->iface->ifname);
+				script_member("leave", pif->iface->ifname, &group);
 				member_del(pif, m);
 			}
 
@@ -867,8 +876,7 @@ static void pif_add(struct iface *iface, int role)
 		}
 	}
 
-	smclog(LOG_INFO, "Interface %s is now proxy %s", iface->ifname,
-	       role == PROXY_UPSTREAM ? "upstream" : "downstream");
+	smclog(LOG_INFO, "Interface %s is now proxy %s", iface->ifname, role_str(role));
 
 	membership_changed(NULL);
 }
@@ -878,8 +886,7 @@ static void pif_del(struct proxy_iface *pif)
 	struct member *m, *tmp;
 	size_t i;
 
-	smclog(LOG_INFO, "Interface %s no longer proxy %s", pif->iface->ifname,
-	       pif->role == PROXY_UPSTREAM ? "upstream" : "downstream");
+	smclog(LOG_INFO, "Interface %s no longer proxy %s", pif->iface->ifname, role_str(pif->role));
 
 	for (i = 0; i < NELEMS(pif->sd); i++) {
 		inet_addr_t group = { 0 };
@@ -1140,6 +1147,247 @@ void proxy_block(struct iface *iface, inet_addr_t *src, inet_addr_t *group, inet
 		if (s)
 			lower(&s->expires, t + last_member_time());
 	}
+}
+
+/* The elected querier of @family on @pif, NULL when none */
+static const char *querier_str(struct proxy_iface *pif, int family, char *buf, size_t len)
+{
+	struct querier *q = querier_of(pif, family);
+	inet_addr_t me;
+
+	if (q->me) {
+		querier_addr(pif, family, &me);
+		return inet_addr2str(&me, buf, len);
+	}
+	if (!is_anyaddr(&q->other))
+		return inet_addr2str(&q->other, buf, len);
+
+	return NULL;
+}
+
+/* Seconds until the membership times out, the longest of its timers */
+static long member_timeout(struct member *m, time_t t)
+{
+	struct source *s;
+	time_t expires = m->exclude ? m->expires : 0;
+
+	TAILQ_FOREACH(s, &m->sources, link) {
+		if (s->expires > expires)
+			expires = s->expires;
+	}
+
+	return expires > t ? expires - t : 0;
+}
+
+static int show_member(int sd, struct proxy_iface *pif, struct member *m, time_t t)
+{
+	char g[INET_ADDRSTR_LEN], a[INET_ADDRSTR_LEN];
+	struct source *s;
+	char line[256];
+
+	snprintf(line, sizeof(line), "%-42s %-16s %-8s %7ld ", inet_addr2str(&m->group, g, sizeof(g)),
+		 pif->iface->ifname, m->exclude ? "exclude" : "include", member_timeout(m, t));
+	if (ipc_send(sd, line, strlen(line)) < 0)
+		return -1;
+
+	TAILQ_FOREACH(s, &m->sources, link) {
+		snprintf(line, sizeof(line), "%s%s", s == TAILQ_FIRST(&m->sources) ? "" : ",",
+			 inet_addr2str(&s->addr, a, sizeof(a)));
+		if (ipc_send(sd, line, strlen(line)) < 0)
+			return -1;
+	}
+
+	return ipc_send(sd, "\n", 1);
+}
+
+static int show_member_json(int sd, struct proxy_iface *pif, struct member *m, time_t t, int first)
+{
+	char g[INET_ADDRSTR_LEN], a[INET_ADDRSTR_LEN];
+	struct source *s;
+	char line[256];
+
+	snprintf(line, sizeof(line), "%s{\"group\":\"%s\",\"iface\":\"%s\",\"mode\":\"%s\","
+		 "\"timeout\":%ld,\"sources\":[", first ? "" : ",", inet_addr2str(&m->group, g, sizeof(g)),
+		 pif->iface->ifname, m->exclude ? "exclude" : "include", member_timeout(m, t));
+	if (ipc_send(sd, line, strlen(line)) < 0)
+		return -1;
+
+	TAILQ_FOREACH(s, &m->sources, link) {
+		snprintf(line, sizeof(line), "%s\"%s\"", s == TAILQ_FIRST(&m->sources) ? "" : ",",
+			 inet_addr2str(&s->addr, a, sizeof(a)));
+		if (ipc_send(sd, line, strlen(line)) < 0)
+			return -1;
+	}
+
+	return ipc_send(sd, "]}", 2);
+}
+
+static int show_pif_json(int sd, struct proxy_iface *pif, int first)
+{
+	char q4[INET_ADDRSTR_LEN], q6[INET_ADDRSTR_LEN];
+	char q4_field[INET_ADDRSTR_LEN + 2], q6_field[INET_ADDRSTR_LEN + 2];
+	const char *q;
+	char line[256];
+
+	q = querier_str(pif, AF_INET, q4, sizeof(q4));
+	snprintf(q4_field, sizeof(q4_field), q ? "\"%s\"" : "null", q);
+	q = querier_str(pif, AF_INET6, q6, sizeof(q6));
+	snprintf(q6_field, sizeof(q6_field), q ? "\"%s\"" : "null", q);
+
+	snprintf(line, sizeof(line), "%s{\"name\":\"%s\",\"role\":\"%s\",\"igmp_querier\":%s,"
+		 "\"mld_querier\":%s}", first ? "" : ",", pif->iface->ifname, role_str(pif->role),
+		 q4_field, q6_field);
+
+	return ipc_send(sd, line, strlen(line));
+}
+
+/* The proxy interfaces, their queriers and the memberships learned */
+int proxy_show(int sd, enum show_mode mode)
+{
+	char q4[INET_ADDRSTR_LEN], q6[INET_ADDRSTR_LEN];
+	struct proxy_iface *pif;
+	struct member *m;
+	time_t t = now();
+	const char *hdr;
+	char line[256];
+	int first;
+
+	if (mode == SHOW_JSON) {
+		ipc_send(sd, "{\"members\":{\"interfaces\":[", 26);
+		first = 1;
+		TAILQ_FOREACH(pif, &pif_list, link) {
+			if (show_pif_json(sd, pif, first) < 0)
+				return -1;
+			first = 0;
+		}
+		ipc_send(sd, "],\"groups\":[", 12);
+		first = 1;
+		TAILQ_FOREACH(pif, &pif_list, link) {
+			TAILQ_FOREACH(m, &pif->members, link) {
+				if (show_member_json(sd, pif, m, t, first) < 0)
+					return -1;
+				first = 0;
+			}
+		}
+		ipc_send(sd, "]}}\n", 4);
+		return 0;
+	}
+
+	if (TAILQ_EMPTY(&pif_list))
+		return 0;
+
+	if (mode == SHOW_DETAIL) {
+		hdr = "IGMP/MLD Proxy Interfaces_\n";
+		ipc_send(sd, hdr, strlen(hdr));
+		snprintf(line, sizeof(line), "%-16s %-10s %-15s %s=\n", "PHYINT", "ROLE", "IGMP QUERIER", "MLD QUERIER");
+		ipc_send(sd, line, strlen(line));
+		TAILQ_FOREACH(pif, &pif_list, link) {
+			const char *a = querier_str(pif, AF_INET, q4, sizeof(q4));
+			const char *b = querier_str(pif, AF_INET6, q6, sizeof(q6));
+
+			snprintf(line, sizeof(line), "%-16s %-10s %-15s %s\n", pif->iface->ifname,
+				 role_str(pif->role), a ? a : "", b ? b : "");
+			if (ipc_send(sd, line, strlen(line)) < 0)
+				return -1;
+		}
+	}
+
+	hdr = "IGMP/MLD Proxy Memberships_\n";
+	ipc_send(sd, hdr, strlen(hdr));
+	snprintf(line, sizeof(line), "%-42s %-16s %-8s %7s  %s=\n", "GROUP", "PHYINT", "MODE",
+		 "TIMEOUT", "SOURCES");
+	ipc_send(sd, line, strlen(line));
+	TAILQ_FOREACH(pif, &pif_list, link) {
+		TAILQ_FOREACH(m, &pif->members, link) {
+			if (show_member(sd, pif, m, t) < 0)
+				return -1;
+		}
+	}
+
+	return 0;
+}
+
+/* Querier status of one family on a downstream interface */
+static int show_querier(int sd, struct proxy_iface *pif, int family, time_t t, enum show_mode mode, int first)
+{
+	char addr[INET_ADDRSTR_LEN], tmo[32], line[256];
+	struct querier *q = querier_of(pif, family);
+	int version = family == AF_INET6 ? q->gen.cur - 1 : q->gen.cur;
+	const char *state;
+	inet_addr_t me;
+
+	if (iface_get_vif(family, pif->iface) == NO_VIF)
+		return 0;
+
+	switch (querier_addr(pif, family, &me)) {
+	case 1:  state = "up";    break;
+	case 0:  state = "proxy"; break;
+	default: state = "down";  break;
+	}
+
+	if (!querier_str(pif, family, addr, sizeof(addr)))
+		inet_addr2str(&me, addr, sizeof(addr));
+
+	/* the timeout only exists while another querier is elected */
+	if (!q->me && !is_anyaddr(&q->other))
+		snprintf(tmo, sizeof(tmo), "%ld", q->expires > t ? (long)(q->expires - t) : 0L);
+	else
+		strlcpy(tmo, mode == SHOW_JSON ? "null" : "None", sizeof(tmo));
+
+	if (mode == SHOW_JSON)
+		snprintf(line, sizeof(line), "%s{\"interface\":\"%s\",\"family\":\"%s\",\"state\":\"%s\","
+			 "\"querier\":\"%s\",\"timeout\":%s,\"interval\":%d,\"router-timeout\":%d,\"version\":%d}",
+			 first ? "" : ",", pif->iface->ifname, family == AF_INET6 ? "ipv6" : "ipv4", state,
+			 addr, tmo, query_interval(pif), other_querier_interval(pif), version);
+	else
+		snprintf(line, sizeof(line), "%-16s %-5s %-6s %-40s %8d %8s %3d\n", pif->iface->ifname,
+			 family_name(family), state, addr, query_interval(pif), tmo, version);
+
+	if (ipc_send(sd, line, strlen(line)) < 0)
+		return -1;
+
+	return 1;
+}
+
+/* The querier of each family on each downstream interface */
+int proxy_show_querier(int sd, enum show_mode mode)
+{
+	struct proxy_iface *pif;
+	time_t t = now();
+	int first = 1, rc;
+	char line[256];
+
+	if (mode != SHOW_JSON) {
+		if (TAILQ_EMPTY(&pif_list))
+			return 0;
+
+		ipc_send(sd, "IGMP/MLD Queriers_\n", 19);
+		snprintf(line, sizeof(line), "%-16s %-5s %-6s %-40s %8s %8s %3s=\n", "PHYINT", "PROTO",
+			 "STATE", "QUERIER", "INTERVAL", "TIMEOUT", "VER");
+		ipc_send(sd, line, strlen(line));
+	} else
+		ipc_send(sd, "{\"querier\":[", 12);
+
+	TAILQ_FOREACH(pif, &pif_list, link) {
+		if (pif->role != PROXY_DOWNSTREAM)
+			continue;
+
+		rc = show_querier(sd, pif, AF_INET, t, mode, first);
+		if (rc < 0)
+			return -1;
+		first = first && !rc;
+#ifdef HAVE_IPV6_MULTICAST_HOST
+		rc = show_querier(sd, pif, AF_INET6, t, mode, first);
+		if (rc < 0)
+			return -1;
+		first = first && !rc;
+#endif
+	}
+
+	if (mode == SHOW_JSON)
+		ipc_send(sd, "]}\n", 3);
+
+	return 0;
 }
 
 void proxy_exit(void)

@@ -23,6 +23,7 @@
 #include "config.h"
 
 #include "inet.h"
+#include "show.h"
 
 struct iface;
 struct mroute;
@@ -47,6 +48,9 @@ void proxy_report    (struct iface *iface, inet_addr_t *src, inet_addr_t *group,
 void proxy_include   (struct iface *iface, inet_addr_t *src, inet_addr_t *group, inet_addr_t *srcs, int num);
 void proxy_block     (struct iface *iface, inet_addr_t *src, inet_addr_t *group, inet_addr_t *srcs, int num);
 void proxy_leave     (struct iface *iface, inet_addr_t *src, inet_addr_t *group, int gen);
+
+int  proxy_show      (int sd, enum show_mode mode);
+int  proxy_show_querier(int sd, enum show_mode mode);
 #else
 #define proxy_conf_reset()
 #define proxy_conf(keyword, arg) 0
@@ -54,6 +58,8 @@ void proxy_leave     (struct iface *iface, inet_addr_t *src, inet_addr_t *group,
 #define proxy_sync(iface)
 #define proxy_oifs(kern)        0
 #define proxy_topology(bridge, port)
+#define proxy_show(sd, mode)    1
+#define proxy_show_querier(sd, mode) 1
 #endif
 
 #endif /* SMCROUTE_PROXY_H_ */

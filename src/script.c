@@ -77,32 +77,25 @@ int script_init(char *script)
 	return 0;
 }
 
-int script_exec(struct mroute *mroute)
+/* Run the script with @action, the variables it may read set or cleared */
+static int run(const char *action, const char *iface, inet_addr_t *source, inet_addr_t *group)
 {
+	char *argv[] = { exec, (char *)action, NULL };
+	char buf[INET_ADDRSTR_LEN];
 	pid_t pid;
 
-	char *argv[] = {
-		exec,
-		"reload",
-		NULL,
-	};
-
-	if (!exec)
-		return 0;
-
-	if (mroute) {
-		char source[INET_ADDRSTR_LEN], group[INET_ADDRSTR_LEN];
-
-		inet_addr2str(&mroute->source, source, sizeof(source));
-		inet_addr2str(&mroute->group, group, sizeof(group));
-
-		setenv("source", source, 1);
-		setenv("group", group, 1);
-		argv[1] = "install";
-	} else {
+	if (iface)
+		setenv("iface", iface, 1);
+	else
+		unsetenv("iface");
+	if (source)
+		setenv("source", inet_addr2str(source, buf, sizeof(buf)), 1);
+	else
 		unsetenv("source");
+	if (group)
+		setenv("group", inet_addr2str(group, buf, sizeof(buf)), 1);
+	else
 		unsetenv("group");
-	}
 
 	pid = fork();
 	if (!pid) {
@@ -119,10 +112,28 @@ int script_exec(struct mroute *mroute)
 	return EX_OK;
 }
 
+int script_exec(struct mroute *mroute)
+{
+	if (!exec)
+		return 0;
+	if (!mroute)
+		return run("reload", NULL, NULL, NULL);
+
+	return run("install", NULL, &mroute->source, &mroute->group);
+}
+
+/* A proxy membership on @ifname came or went, @action is "join" or "leave" */
+int script_member(const char *action, const char *ifname, inet_addr_t *group)
+{
+	if (!exec)
+		return 0;
+
+	return run(action, ifname, NULL, group);
+}
+
 /**
  * Local Variables:
  *  indent-tabs-mode: t
  *  c-file-style: "linux"
  * End:
  */
-
