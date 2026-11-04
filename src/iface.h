@@ -42,6 +42,7 @@ struct iface {
 	uint8_t  threshold;		/* TTL threshold: 1-255, default: 1 */
 	uint8_t  proxy;			/* Configured PROXY_ role */
 	uint8_t  proxy_querier;		/* Query from 0.0.0.0 and :: */
+	uint8_t  brstate;		/* Last seen bridge port state */
 	uint16_t query_interval;	/* Querier interval, 0: global */
 };
 
@@ -67,6 +68,7 @@ struct iface *iface_iterator          (int first);
 struct iface *iface_outbound_iterator (struct mroute *route, int first);
 
 struct iface *iface_find              (int ifindex);
+int           iface_lower             (struct iface *iface);
 struct iface *iface_find_by_name      (const char *ifname);
 struct iface *iface_find_by_inbound   (struct mroute *route);
 

@@ -40,6 +40,7 @@ void proxy_exit      (void);
 void proxy_sync      (struct iface *iface);
 int  proxy_role      (struct iface *iface);
 int  proxy_oifs      (struct mroute *kern);
+void proxy_topology  (int bridge, int port);
 
 void proxy_query     (struct iface *iface, inet_addr_t *src, inet_addr_t *group, int mrt, int gen);
 void proxy_report    (struct iface *iface, inet_addr_t *src, inet_addr_t *group, int gen);
@@ -52,6 +53,7 @@ void proxy_leave     (struct iface *iface, inet_addr_t *src, inet_addr_t *group,
 #define proxy_exit()
 #define proxy_sync(iface)
 #define proxy_oifs(kern)        0
+#define proxy_topology(bridge, port)
 #endif
 
 #endif /* SMCROUTE_PROXY_H_ */

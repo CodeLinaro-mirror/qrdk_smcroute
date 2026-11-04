@@ -34,6 +34,11 @@
 #include <limits.h>
 #include <unistd.h>
 #include <netinet/in.h>
+#include <sys/ioctl.h>
+#ifdef __linux__
+#include <linux/if_vlan.h>
+#include <linux/sockios.h>
+#endif
 
 #include "log.h"
 #include "ipc.h"
@@ -173,6 +178,30 @@ struct iface *iface_find(int ifindex)
 	}
 
 	return NULL;
+}
+
+/* The ifindex of the interface a VLAN interface sits on, 0 if none */
+int iface_lower(struct iface *iface)
+{
+#ifdef SIOCGIFVLAN
+	struct vlan_ioctl_args arg = { .cmd = GET_VLAN_REALDEV_NAME_CMD };
+	int sd, rc;
+
+	strlcpy(arg.device1, iface->ifname, sizeof(arg.device1));
+	sd = socket(AF_INET, SOCK_DGRAM, 0);
+	if (sd == -1)
+		return 0;
+
+	rc = ioctl(sd, SIOCGIFVLAN, &arg);
+	close(sd);
+	if (rc)
+		return 0;
+
+	return if_nametoindex(arg.u.device2);
+#else
+	(void)iface;
+	return 0;
+#endif
 }
 
 /**

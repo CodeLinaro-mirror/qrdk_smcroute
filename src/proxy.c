@@ -37,17 +37,18 @@
 #include "util.h"
 
 /* smcroute.conf querier settings, timers in seconds, RFC 3376 §8 */
-enum { QUERY_INTERVAL, RESPONSE_INTERVAL, LAST_MEMBER_INTERVAL, ROBUSTNESS, ROUTER_TIMEOUT };
+enum { QUERY_INTERVAL, RESPONSE_INTERVAL, LAST_MEMBER_INTERVAL, ROBUSTNESS, ROUTER_TIMEOUT, TOPOLOGY_QUERY };
 
 static struct {
 	const char *keyword;
 	int val, def, min, max;
-} timers[] = {
+} settings[] = {
 	[QUERY_INTERVAL]       = { "global-query-interval",       125, 125, 1, 1024 },
 	[RESPONSE_INTERVAL]    = { "global-response-interval",     10,  10, 1, 1024 },
 	[LAST_MEMBER_INTERVAL] = { "global-last-member-interval",   1,   1, 1, 1024 },
 	[ROBUSTNESS]           = { "robustness",                    2,   2, 2,   10 },
 	[ROUTER_TIMEOUT]       = { "router-timeout",                0,   0, 1, 1024 }, /* 0: derived */
+	[TOPOLOGY_QUERY]       = { "topology-query",                1,   1, 0,    1 },
 };
 
 /* Joined on downstream interfaces to receive what hosts send to routers */
@@ -117,6 +118,7 @@ struct proxy_iface {
 	int           role;
 	int           sd[NELEMS(control_groups)];	/* -1 if not joined */
 	struct querier querier[2];			/* IPv4, IPv6 */
+	int           parent;				/* ifindex below a VLAN interface */
 	TAILQ_HEAD(, member) members;
 };
 
@@ -129,25 +131,32 @@ void proxy_conf_reset(void)
 {
 	size_t i;
 
-	for (i = 0; i < NELEMS(timers); i++)
-		timers[i].val = timers[i].def;
+	for (i = 0; i < NELEMS(settings); i++)
+		settings[i].val = settings[i].def;
 }
 
-/* Returns 0 if @keyword is not a timer, 1 when set, -1 when @arg is out of range */
+/* Returns 0 if @keyword is not a setting, 1 when set, -1 when @arg is out of range */
 int proxy_conf(const char *keyword, const char *arg)
 {
 	size_t i;
 	int val;
 
-	for (i = 0; i < NELEMS(timers); i++) {
-		if (strcmp(timers[i].keyword, keyword))
+	for (i = 0; i < NELEMS(settings); i++) {
+		if (strcmp(settings[i].keyword, keyword))
 			continue;
 
-		val = arg ? atoi(arg) : 0;
-		if (val < timers[i].min || val > timers[i].max)
+		if (!arg)
+			val = -1;
+		else if (settings[i].max == 1 && !strcmp(arg, "on"))
+			val = 1;
+		else if (settings[i].max == 1 && !strcmp(arg, "off"))
+			val = 0;
+		else
+			val = atoi(arg);
+		if (val < settings[i].min || val > settings[i].max)
 			return -1;
 
-		timers[i].val = val;
+		settings[i].val = val;
 		return 1;
 	}
 
@@ -159,28 +168,28 @@ static int query_interval(struct proxy_iface *pif)
 	if (pif->iface->query_interval)
 		return pif->iface->query_interval;
 
-	return timers[QUERY_INTERVAL].val;
+	return settings[QUERY_INTERVAL].val;
 }
 
 /* Must not exceed the query interval, RFC 3376 §8.3 */
 static int response_interval(struct proxy_iface *pif)
 {
-	return MIN(timers[RESPONSE_INTERVAL].val, query_interval(pif));
+	return MIN(settings[RESPONSE_INTERVAL].val, query_interval(pif));
 }
 
 /* Group membership interval, RFC 3376 §8.4 */
 static int group_interval(struct proxy_iface *pif)
 {
-	return timers[ROBUSTNESS].val * query_interval(pif) + response_interval(pif);
+	return settings[ROBUSTNESS].val * query_interval(pif) + response_interval(pif);
 }
 
 /* Other querier present interval, RFC 3376 §8.5 */
 static int other_querier_interval(struct proxy_iface *pif)
 {
-	if (timers[ROUTER_TIMEOUT].val)
-		return timers[ROUTER_TIMEOUT].val;
+	if (settings[ROUTER_TIMEOUT].val)
+		return settings[ROUTER_TIMEOUT].val;
 
-	return timers[ROBUSTNESS].val * query_interval(pif) + response_interval(pif) / 2;
+	return settings[ROBUSTNESS].val * query_interval(pif) + response_interval(pif) / 2;
 }
 
 /* Startup query interval, RFC 3376 §8.6 */
@@ -192,7 +201,7 @@ static int startup_interval(struct proxy_iface *pif)
 /* Last member query time, RFC 3376 §8.8 and §8.9 */
 static int last_member_time(void)
 {
-	return timers[ROBUSTNESS].val * timers[LAST_MEMBER_INTERVAL].val;
+	return settings[ROBUSTNESS].val * settings[LAST_MEMBER_INTERVAL].val;
 }
 
 static time_t now(void)
@@ -641,7 +650,7 @@ int proxy_oifs(struct mroute *kern)
 static int send_query(struct proxy_iface *pif, int family, inet_addr_t *group)
 {
 	struct querier *q = querier_of(pif, family);
-	int mrt = group ? timers[LAST_MEMBER_INTERVAL].val : response_interval(pif);
+	int mrt = group ? settings[LAST_MEMBER_INTERVAL].val : response_interval(pif);
 	char g[INET_ADDRSTR_LEN] = "all";
 	inet_addr_t dst = { 0 }, me;
 	uint8_t buf[64];
@@ -654,9 +663,9 @@ static int send_query(struct proxy_iface *pif, int family, inet_addr_t *group)
 		inet_str2addr(family == AF_INET6 ? "ff02::1" : "224.0.0.1", &dst);
 
 	if (family == AF_INET6)
-		len = mld_build_query(buf, q->gen.cur, mrt, group, query_interval(pif), timers[ROBUSTNESS].val);
+		len = mld_build_query(buf, q->gen.cur, mrt, group, query_interval(pif), settings[ROBUSTNESS].val);
 	else
-		len = igmp_build_query(buf, q->gen.cur, mrt, group, query_interval(pif), timers[ROBUSTNESS].val);
+		len = igmp_build_query(buf, q->gen.cur, mrt, group, query_interval(pif), settings[ROBUSTNESS].val);
 
 	querier_addr(pif, family, &me);
 	if (kern_send(pif->iface, &me, &dst, buf, len)) {
@@ -670,9 +679,16 @@ static int send_query(struct proxy_iface *pif, int family, inet_addr_t *group)
 	return 0;
 }
 
+/* Query now and start the startup burst, RFC 3376 §8.6 */
+static void querier_restart(struct querier *q, time_t t)
+{
+	q->startup = settings[ROBUSTNESS].val;
+	q->next    = t;
+}
+
 /*
  * Querier timers of one family on a downstream interface.  Taking over
- * starts with a query burst, RFC 3376 §8.6, then one per interval.
+ * starts with a query burst, then one per interval.
  */
 static void querier_tick(struct proxy_iface *pif, int family, time_t t)
 {
@@ -697,9 +713,8 @@ static void querier_tick(struct proxy_iface *pif, int family, time_t t)
 
 		smclog(LOG_INFO, "Assuming %s %squerier duties on %s", family_name(family),
 		       is_anyaddr(&me) ? "proxy " : "", pif->iface->ifname);
-		q->me      = 1;
-		q->startup = timers[ROBUSTNESS].val;
-		q->next    = t;
+		q->me = 1;
+		querier_restart(q, t);
 	}
 
 	if (q->next > t)
@@ -714,6 +729,39 @@ static void querier_tick(struct proxy_iface *pif, int family, time_t t)
 	if (q->startup)
 		q->startup--;
 	q->next = t + (q->startup ? startup_interval(pif) : query_interval(pif));
+}
+
+/* A port of @bridge started forwarding, RFC 4541 §2.1.1 */
+void proxy_topology(int bridge, int port)
+{
+	struct proxy_iface *pif;
+	time_t t = now();
+	size_t i;
+
+	if (!settings[TOPOLOGY_QUERY].val)
+		return;
+
+	TAILQ_FOREACH(pif, &pif_list, link) {
+		char ifname[IFNAMSIZ];
+		int me = 0;
+
+		if (pif->role != PROXY_DOWNSTREAM)
+			continue;
+		if (pif->iface->ifindex != bridge && pif->parent != bridge)
+			continue;
+
+		for (i = 0; i < NELEMS(pif->querier); i++) {
+			if (!pif->querier[i].me)
+				continue;
+
+			querier_restart(&pif->querier[i], t);
+			me = 1;
+		}
+
+		if (me)
+			smclog(LOG_INFO, "Port %s forwarding, querying %s",
+			       if_indextoname(port, ifname) ? ifname : "?", pif->iface->ifname);
+	}
 }
 
 /*
@@ -744,7 +792,7 @@ static void sweep(void *arg)
 			int changed = 0;
 
 			gen_tick(&m->gen, t);
-			if (burst_due(&m->query, t, timers[LAST_MEMBER_INTERVAL].val))
+			if (burst_due(&m->query, t, settings[LAST_MEMBER_INTERVAL].val))
 				send_query(pif, group.ss_family, &group);
 
 			TAILQ_FOREACH_SAFE(s, &m->sources, link, stmp) {
@@ -788,8 +836,9 @@ static void pif_add(struct iface *iface, int role)
 		return;
 	}
 
-	pif->iface = iface;
-	pif->role  = role;
+	pif->iface  = iface;
+	pif->role   = role;
+	pif->parent = iface_lower(iface);
 	TAILQ_INIT(&pif->members);
 	for (i = 0; i < NELEMS(pif->sd); i++)
 		pif->sd[i] = -1;
@@ -953,7 +1002,7 @@ void proxy_query(struct iface *iface, inet_addr_t *src, inet_addr_t *group, int 
 
 	m = member_find(pif, group);
 	if (m && m->exclude)
-		lower(&m->expires, t + timers[ROBUSTNESS].val * mrt);
+		lower(&m->expires, t + settings[ROBUSTNESS].val * mrt);
 }
 
 /* IGMPv1/v2 and MLDv1 report, or a v3 EXCLUDE record: any source wanted */
@@ -1045,7 +1094,7 @@ static struct member *leaving(struct iface *iface, inet_addr_t *src, inet_addr_t
 			smclog(LOG_INFO, "Leave for %s from %s on %s, querying the group",
 			       inet_addr2str(group, g, sizeof(g)), inet_addr2str(src, s, sizeof(s)),
 			       iface->ifname);
-			m->query.left = timers[ROBUSTNESS].val;
+			m->query.left = settings[ROBUSTNESS].val;
 			m->query.next = t;
 		}
 
