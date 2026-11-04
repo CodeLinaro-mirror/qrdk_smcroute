@@ -36,13 +36,12 @@ in situations where static multicast routes should be maintained and/or
 no proper IGMP or MLD signaling exists.
 .Pp
 Multicast routes exist in the UNIX kernel only as long as a multicast
-routing daemon is running.  On Linux, multiple multicast routers can run
-simultaneously using different multicast routing tables.  To run
+routing daemon is running.  On Linux,
 .Nm
-and,
-.Nm mrouted
-at the same time, set the former to use a routing table other than the
-default (0).
+can run next to another multicast router, each with its own multicast
+routing table, see the
+.Fl t
+option.
 .Pp
 .Nm
 modifies the kernel routing table and needs either full
@@ -162,12 +161,23 @@ recommended to use the ident option instead.
 .It Fl s
 Let daemon log to syslog, default unless running in foreground.
 .It Fl t Ar ID
-Set multicast routing table ID.  Remember to also create routing rules
-directing packets to the table.  This example uses routing table ID 123:
+Set multicast routing table ID.  The kernel looks up every multicast
+packet in one table only, chosen by
+.Ql ip mrule
+rules on the inbound interface, the outbound interface for locally
+originated traffic, or a firewall mark.  Without a rule all traffic uses
+the default table, so create rules directing packets to the table.  This
+example uses routing table ID 123:
 .Bd -unfilled -offset left
 ip mrule add iif eth0 lookup 123
 ip mrule add oif eth0 lookup 123
 .Ed
+.Pp
+This divides the inbound interfaces between the daemons running.  An
+outbound interface can be shared, it can be a VIF in several tables.
+IGMP and MLD are not divided this way, they reach every daemon, so only
+enable IGMP/MLD proxying on interfaces no other multicast router acts
+on.
 .Pp
 .Nm Note:
 Only available on Linux.

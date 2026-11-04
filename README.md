@@ -38,8 +38,9 @@ routes should be maintained and/or no proper IGMP or MLD signaling
 exists.
 
 Multicast routes exist in the UNIX kernel as long as a multicast routing
-daemon runs.  On Linux, multiple multicast routers can run simultaneously
-using different multicast routing tables.
+daemon runs.  On Linux, SMCRoute can run next to another multicast
+router, each with its own multicast routing table, see [Multiple Routing
+Tables](#multiple-routing-tables).
 
 The full documentation of SMCRoute is available in the manual pages, see
 [smcrouted(8)][], [smcroutectl(8)][], and [smcroute.conf(5)][].  Common
@@ -214,12 +215,24 @@ Linux listener is implemented.
 
 ### Multiple Routing Tables
 
-On Linux it is possible to run multiple multicast routing daemons due to
-its support for multiple multicast routing tables.  In such setups it
-may be useful to change the default identity of SMCRoute:
+On Linux, several multicast routing daemons can run side by side, each
+with its own multicast routing table.  The kernel looks up every
+multicast packet in one table only, chosen by `ip mrule` rules on the
+inbound interface, the outbound interface for locally originated
+traffic, or a firewall mark.  Without a rule all traffic uses the
+default table, so a daemon on another table sees nothing until a rule
+points traffic to it:
 
+    ip mrule add iif eth0 lookup 1
+    ip mrule add oif eth0 lookup 1
     smcrouted -i mrt1 -t 1
-    smcrouted -i mrt2 -t 2
+
+In practice this divides the inbound interfaces between the daemons,
+e.g., SMCRoute routes what arrives on `eth0` and mrouted the rest.  An
+outbound interface can be shared, it can be a VIF in several tables.
+IGMP and MLD are not divided this way, they reach every daemon, so only
+enable IGMP/MLD proxying on interfaces no other multicast router acts
+on.
 
 The `-i NAME` option alters the default syslog name, config file, PID
 file, and client socket file name used.  In the first instance above,
