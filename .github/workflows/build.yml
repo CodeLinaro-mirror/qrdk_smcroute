@@ -29,6 +29,11 @@ jobs:
           sudo modprobe ip_gre
           sudo apt-get -y update
           sudo apt-get -y install pkg-config libsystemd-dev libcap-dev tshark iptables valgrind
+      - name: Install mtools
+        run: |
+          git clone --depth 1 -b v3.2 https://github.com/troglobit/mtools /tmp/mtools
+          make -C /tmp/mtools
+          sudo make -C /tmp/mtools install prefix=/usr
       - uses: actions/checkout@v6
       - name: Configure
         # Build in a sub-directory so we can safely set a+w on all
