@@ -38,7 +38,9 @@
 #endif
 
 #ifdef HAVE_NETINET_IP_MROUTE_H
-#define _KERNEL
+#ifndef __FreeBSD__
+#define _KERNEL			/* struct igmpmsg is kernel-only on OpenBSD */
+#endif
 #include <netinet/ip_mroute.h>
 #undef _KERNEL
 #else

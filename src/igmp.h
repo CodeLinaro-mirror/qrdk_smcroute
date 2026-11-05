@@ -26,6 +26,13 @@
 
 #include "inet.h"
 
+/* Message types, RFC 3376 §4, the BSDs use other names */
+#ifndef IGMP_MEMBERSHIP_QUERY
+#define IGMP_MEMBERSHIP_QUERY		0x11
+#define IGMP_V1_MEMBERSHIP_REPORT	0x12
+#define IGMP_V2_MEMBERSHIP_REPORT	0x16
+#define IGMP_V2_LEAVE_GROUP		0x17
+#endif
 #ifndef IGMP_V3_MEMBERSHIP_REPORT
 #define IGMP_V3_MEMBERSHIP_REPORT	0x22
 #endif

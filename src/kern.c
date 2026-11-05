@@ -24,6 +24,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
+#include <netinet/in.h>
 #ifdef IP_RECVIF
 #include <net/if_dl.h>
 #endif

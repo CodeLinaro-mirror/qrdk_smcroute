@@ -177,6 +177,7 @@ void igmp_recv(int ifindex, uint8_t *buf, size_t len)
 	inet_addr_t src = { 0 }, group = { 0 };
 	struct iface *iface;
 	struct igmp *igmp;
+	struct in_addr saddr;
 	struct ip *ip;
 	size_t hlen, dlen;
 	int mrt, gen;
@@ -199,7 +200,8 @@ void igmp_recv(int ifindex, uint8_t *buf, size_t len)
 		return;
 
 	igmp = (struct igmp *)(buf + hlen);
-	inet_addr_set(&src, &ip->ip_src);
+	saddr = ip->ip_src;
+	inet_addr_set(&src, &saddr);
 	inet_addr2str(&src, s1, sizeof(s1));
 
 	if (inet_cksum(igmp, dlen)) {

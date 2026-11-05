@@ -21,6 +21,7 @@
 
 #ifdef HAVE_IPV6_MULTICAST_HOST
 #include <string.h>
+#include <sys/types.h>
 #include <netinet/in.h>
 #include <netinet/icmp6.h>
 
@@ -78,6 +79,7 @@ void mld_recv(int ifindex, inet_addr_t *src, int hlim, uint8_t *buf, size_t len)
 	struct mld_hdr *mld;
 	struct iface *iface;
 	inet_addr_t group = { 0 };
+	struct in6_addr maddr;
 	int mrt, gen;
 
 	if (len < sizeof(*mld))
@@ -108,7 +110,8 @@ void mld_recv(int ifindex, inet_addr_t *src, int hlim, uint8_t *buf, size_t len)
 		return;
 	}
 
-	inet_addr6_set(&group, &mld->mld_addr);
+	maddr = mld->mld_addr;
+	inet_addr6_set(&group, &maddr);
 
 	switch (mld->mld_type) {
 	case MLD_LISTENER_QUERY:

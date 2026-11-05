@@ -97,7 +97,7 @@ jobs:
           run: |
             set -e
             ./autogen.sh
-            ./configure --enable-mrdisc
+            ./configure
             make -j3
             ./src/smcrouted -h
             ./src/smcroutectl -h
