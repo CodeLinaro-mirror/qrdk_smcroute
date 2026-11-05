@@ -6,6 +6,7 @@
 
 # shellcheck source=/dev/null
 . "$(dirname "$0")/lib.sh"
+check_dep mreceive
 
 UP=/tmp/$NM/wan
 DOWN=/tmp/$NM/lan
@@ -39,11 +40,13 @@ print "Starting smcrouted ..."
 sleep 1
 
 print "Joining groups on downstream host ..."
-nsenter --net="$DOWN" -- mcjoin -o -i eth0 -W 60 225.1.2.3 ff2e::42 >/dev/null 2>&1 &
+nsenter --net="$DOWN" -- timeout 60 mreceive -q -I eth0 -g 225.1.2.3 -p 4441 >/dev/null 2>&1 &
+echo $! >> "/tmp/$NM/PIDs"
+nsenter --net="$DOWN" -- timeout 60 mreceive -q -I eth0 -g ff2e::42 -p 4442 >/dev/null 2>&1 &
 echo $! >> "/tmp/$NM/PIDs"
 sleep 1
 nsenter --net="$DOWN" -- sh -c 'echo 2 > /proc/sys/net/ipv4/conf/eth0/force_igmp_version'
-nsenter --net="$DOWN" -- mcjoin -o -i eth0 -W 60 225.1.2.5 >/dev/null 2>&1 &
+nsenter --net="$DOWN" -- timeout 60 mreceive -q -I eth0 -g 225.1.2.5 -p 4443 >/dev/null 2>&1 &
 echo $! >> "/tmp/$NM/PIDs"
 sleep 2
 

@@ -6,6 +6,7 @@
 
 # shellcheck source=/dev/null
 . "$(dirname "$0")/lib.sh"
+check_dep mreceive
 
 UP=/tmp/$NM/wan
 DOWN=/tmp/$NM/lan
@@ -45,9 +46,11 @@ print "Starting smcrouted ..."
 sleep 2
 
 print "Joining groups on downstream host for 8 sec ..."
-nsenter --net="$DOWN" -- mcjoin -o -i eth0 -W 8 225.1.2.3 10.0.0.10,232.1.1.1 >/dev/null 2>&1 &
+nsenter --net="$DOWN" -- timeout 8 mreceive -q -I eth0 -g 225.1.2.3 -p 4441 >/dev/null 2>&1 &
 echo $! >> "/tmp/$NM/PIDs"
-nsenter --net="$DOWN" -- mcjoin -o -i eth0 -W 8 -p 1235 ff2e::42 >/dev/null 2>&1 &
+nsenter --net="$DOWN" -- timeout 8 mreceive -q -I eth0 -g 232.1.1.1 -s 10.0.0.10 -p 4442 >/dev/null 2>&1 &
+echo $! >> "/tmp/$NM/PIDs"
+nsenter --net="$DOWN" -- timeout 8 mreceive -q -I eth0 -g ff2e::42 -p 4443 >/dev/null 2>&1 &
 echo $! >> "/tmp/$NM/PIDs"
 sleep 2
 
