@@ -718,19 +718,19 @@ static void handle_nocache6(int sd, void *arg)
 		return;
 	}
 
-	if ((size_t)result < sizeof(*im6))
-		return;
-
 	/*
 	 * The mrt6msg struct is overlayed on the ICMPv6 header, so the
 	 * im6_mbz field (must-be-zero) is the ICMPv6 type, e.g. 143 for
 	 * an MLDv2 report, and im6_msgtype its code.
 	 */
 	im6 = (struct mrt6msg *)tmp;
-	if (im6->im6_mbz != 0) {
+	if (result > 0 && im6->im6_mbz != 0) {
 		mld_recv(rx.ifindex, &rx.src, rx.hlim, (uint8_t *)tmp, result);
 		return;
 	}
+
+	if ((size_t)result < sizeof(*im6))
+		return;
 
 	if (im6->im6_msgtype == 0)
 		return;
